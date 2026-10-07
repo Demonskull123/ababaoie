@@ -44,6 +44,8 @@ local tradeOn = false
 local tradeDelay = 0.04
 local lastTradeAt = 0
 local tradeWindow = 0.05
+local tradeHitGap = 0.12
+local tradeHitsPerAnim = 2
 local blockEndTimer = nil
 local blockHoldUntil = 0
 
@@ -509,16 +511,20 @@ local function onAttack(animId)
 		end
 		lastTradeAt = now
 		task.spawn(function()
-			pcall(function()
-				local waitTime
-				if hasTradeTime then
-					waitTime = timing.trade + tradeDelay
-				else
-					waitTime = abHold + ping + tradeDelay
+			local waitTime
+			if hasTradeTime then
+				waitTime = timing.trade + tradeDelay
+			else
+				waitTime = abHold + ping + tradeDelay
+			end
+			task.wait(waitTime)
+			for i = 1, tradeHitsPerAnim do
+				if not tradeOn then break end
+				fireM1()
+				if i < tradeHitsPerAnim then
+					task.wait(tradeHitGap)
 				end
-				task.wait(waitTime)
-				if tradeOn then fireM1() end
-			end)
+			end
 		end)
 	end
 end
@@ -877,11 +883,11 @@ local function doJoinLowest()
 				local res = game:HttpGet(url)
 				local data = HttpService:JSONDecode(res)
 				if data and data.data then
-					for _, srv in ipairs(data.data) do
-						if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
+					for _, srv in ipairs(data.data) do						if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
 							if srv.playing < bestCount then
 								bestCount = srv.playing
-								bestId = srv.id							end
+								bestId = srv.id
+							end
 						end
 					end
 					cursor = data.nextPageCursor or ""
@@ -2203,7 +2209,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Fires M1 after block window. Never gates the block path.",
+	Description = "Fires exactly 2 M1 hits per detected attack anim. Does not gate block.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2222,13 +2228,32 @@ TradeTab:CreateSlider({
 })
 TradeTab:CreateSlider({
 	Name = "Trade Window (s)",
-	Description = "Minimum gap between M1 trade fires. Lower = more trades per second.",
+	Description = "Minimum gap between trade bursts. Prevents overlap from rapid detected anims.",
 	Range = {0, 0.5},
 	Increment = 0.005,
 	Suffix = "s",
 	CurrentValue = 0.05,
 	Flag = "MT_Window",
 	Callback = function(v) tradeWindow = v end,
+})
+TradeTab:CreateSlider({
+	Name = "Hits Per Attack",
+	Description = "How many M1s to fire after each detected attack anim. 2 = double tap.",
+	Range = {1, 5},
+	Increment = 1,
+	CurrentValue = 2,
+	Flag = "MT_Hits",
+	Callback = function(v) tradeHitsPerAnim = v end,
+})
+TradeTab:CreateSlider({
+	Name = "Hit Gap (s)",
+	Description = "Delay between trade M1s.",
+	Range = {0.05, 0.5},
+	Increment = 0.01,
+	Suffix = "s",
+	CurrentValue = 0.12,
+	Flag = "MT_HitGap",
+	Callback = function(v) tradeHitGap = v end,
 })
 TradeTab:CreateSection("Manual Test")
 TradeTab:CreateButton({
@@ -2822,4 +2847,4 @@ LP.CharacterAdded:Connect(function()
 	if headRideOn then hookMyAnimator() end
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. AB + MT gate on known ids and saved timings only.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. M1 Trade = 2 hits per attack. Block independent.", 5)
