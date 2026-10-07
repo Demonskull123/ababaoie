@@ -1,4 +1,3 @@
-
 --!strict
 -- outlaw.dev — Auto Farm + Auto Block + M1 Trade + Head Ride + Nanami + Yuji + Visualizer + Block Builder + Player Block Builder + Player + Misc
 
@@ -127,6 +126,9 @@ local loopPlayback = true
 local previewRig, previewHum, previewWorld, previewViewport, previewCamera
 local visGui, combined
 
+-- Deferred visualizer select (set after visualizer builds)
+local pendingSelectAnim = nil
+
 local skipNames = {
 	WalkAnim = true, JumpAnim = true, RunAnim = true, SwimAnim = true,
 	IdleAnim = true, FallAnim = true, SwimIdleAnim = true, ClimbAnim = true,
@@ -178,6 +180,16 @@ local comboEndIds = {
 }
 
 local headRideAnimId = "rbxassetid://1461137417"
+
+-- Universal select: routes to visualizer, queues if not built yet.
+local function selectAnim(id)
+	if not id then return end
+	if getgenv().OutlawSelectAnim then
+		getgenv().OutlawSelectAnim(id)
+	else
+		pendingSelectAnim = id
+	end
+end
 
 local function getInput()
 	local bp = LP:FindFirstChild("Backpack")
@@ -988,6 +1000,10 @@ local function addLogRow(id, name, source, dist)
 	cell(source, 305, 70)
 	cell(tostring(dist or 0), 375, 50)
 
+	row.MouseButton1Click:Connect(function()
+		selectAnim(id)
+	end)
+
 	table.insert(loggerRows, row)
 	if loggerTitle then
 		loggerTitle.Text = "Block Builder     " .. #loggerRows .. " Entries"
@@ -1158,6 +1174,10 @@ local function addMyLogRow(id, name)
 
 	cell(name ~= "" and name or "Anim", 8, 160)
 	cell(id, 170, 220, Color3.fromRGB(180, 200, 215))
+
+	row.MouseButton1Click:Connect(function()
+		selectAnim(id)
+	end)
 
 	table.insert(myLoggerRows, row)
 	if myLoggerTitle then
@@ -1687,40 +1707,19 @@ local function buildVisualizer()
 		end
 	end)
 
-	saveBtn.MouseButton1Click:Connect(function()
-		if not currentId then return end
-		atkIds[currentId] = true
-		timing[currentId] = {
-			delay = tonumber(fields["Delay (s)"].Text) or 0.248,
-			hitboxX = tonumber(fields["Hitbox X"].Text) or 9,
-			hitboxY = tonumber(fields["Hitbox Y"].Text) or 10,
-			hitboxZ = tonumber(fields["Hitbox Z"].Text) or 10,
-			hso = tonumber(fields["HSO"].Text) or 3,
-			maxDist = tonumber(fields["Max Dist"].Text) or 85,
-			repeatN = tonumber(fields["Repeat"].Text) or 1,
-			repDelay = tonumber(fields["Rep Delay"].Text) or 0.35,
-			dodgeDir = fields["Dodge Dir"].Text,
-		}
-		Airflow:Notify("outlaw.dev", "Saved: " .. currentId, 3)
-	end)
-
 	getgenv().OutlawSelectAnim = function(id)
 		currentId = id
 		idBar.Text = id
 		combined.Visible = true
 		playAnim(id)
-		local t = timing[id]
-		if t then
-			fields["Delay (s)"].Text = tostring(t.delay or "0.248")
-			fields["Hitbox X"].Text = tostring(t.hitboxX or "9")
-			fields["Hitbox Y"].Text = tostring(t.hitboxY or "10")
-			fields["Hitbox Z"].Text = tostring(t.hitboxZ or "10")
-			fields["HSO"].Text = tostring(t.hso or "3")
-			fields["Max Dist"].Text = tostring(t.maxDist or "85")
-			fields["Repeat"].Text = tostring(t.repeatN or "1")
-			fields["Rep Delay"].Text = tostring(t.repDelay or "0.35")
-			fields["Dodge Dir"].Text = t.dodgeDir or "None"
-		end
+	end
+
+	if pendingSelectAnim then
+		local id = pendingSelectAnim
+		pendingSelectAnim = nil
+		task.spawn(function()
+			getgenv().OutlawSelectAnim(id)
+		end)
 	end
 
 	LP.CharacterAdded:Connect(function()
@@ -2235,7 +2234,7 @@ YujiTab:CreateButton({
 BlockBuilderTab:CreateSection("Block Builder")
 BlockBuilderTab:CreateToggle({
 	Name = "Show Block Builder Window",
-	Description = "Logs enemy animations in range",
+	Description = "Logs enemy animations in range. Click a row to preview in Visualizer.",
 	CurrentValue = true,
 	Flag = "IL_Show",
 	Callback = function(v)
@@ -2274,7 +2273,7 @@ BlockBuilderTab:CreateButton({
 MyLoggerTab:CreateSection("Player Block Builder")
 MyLoggerTab:CreateToggle({
 	Name = "Show Player Block Builder Window",
-	Description = "Logs only your own animations",
+	Description = "Logs only your own animations. Click a row to preview in Visualizer.",
 	CurrentValue = true,
 	Flag = "ML_Show",
 	Callback = function(v)
@@ -2332,14 +2331,9 @@ VisTab:CreateToggle({
 		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = v end
 	end,
 })
-VisTab:CreateSection("Quick Preview")
-VisTab:CreateButton({
-	Name = "Open Block Builder (no-op if empty)",
-	Callback = function()
-		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = true end
-	end,
-})
-VisTab:CreateLabel("Click any row in Block Builder to preview that anim here.")
+VisTab:CreateSection("Info")
+VisTab:CreateLabel("Click any row in Block Builder or Player Block Builder.")
+VisTab:CreateLabel("It opens the Visualizer and plays that animation.")
 
 -- ===== PLAYER =====
 PlayerTab:CreateSection("Movement")
