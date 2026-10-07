@@ -1,18 +1,30 @@
 --!strict
--- outlaw.dev — Auto Block + M1 Trade + Animation Editor + Visualizer + Info Logger + Self Logger
--- v3: dodge/jump removed; self-logger rehooks correctly across respawns;
---     visualizer camera auto-frames rig (legs visible, large characters supported).
+-- outlaw.dev v4
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Demonskull123/ababaoie/refs/heads/main/aba.txt"))()
 
 local AirflowSrc = "https://raw.githubusercontent.com/PookiePepelsss/Airflow-UI/refs/heads/main/Source.luau"
 
-local Airflow, loadErr
-local ok, res = pcall(function() return loadstring(game:HttpGet(AirflowSrc))() end)
-if ok and type(res) == "table" and res.CreateWindow then Airflow = res end
-if not Airflow then
-	game:GetService("StarterGui"):SetCore("SendNotification", {
-		Title = "outlaw.dev", Text = "Airflow failed: " .. tostring(res), Duration = 10
-	})
-	return
+local Airflow
+do
+	local ok, res = pcall(function() return loadstring(game:HttpGet(AirflowSrc))() end)
+	if ok then
+		if type(res) == "table" then
+			if res.CreateWindow then Airflow = res
+			elseif res.Airflow and res.Airflow.CreateWindow then Airflow = res.Airflow end
+		end
+	end
+	if not Airflow then
+		pcall(function()
+			game:GetService("StarterGui"):SetCore("SendNotification", {
+				Title = "outlaw.dev",
+				Text = "Airflow failed to load. UI skipped.",
+				Duration = 8,
+			})
+		end)
+		warn("[outlaw.dev] Airflow load failed; aborting UI but continuing hooks.")
+		return
+	end
 end
 
 local Players = game:GetService("Players")
@@ -74,7 +86,6 @@ local previewRig, previewHum, previewWorld, previewViewport, previewCamera
 local logRange=120, logHooked={}, logEntries={}
 
 local selfLogOn=false, selfLogHooked={}, selfLogMax=300
-local selfRehookConn=nil
 
 local enemyLogOn=true
 
@@ -259,10 +270,8 @@ local EditorTab = Window:CreateTab("Animation Editor", "radio")
 local SelfTab   = Window:CreateTab("Animation Logger (Me)", "user")
 
 BlockTab:CreateSection("Auto Block")
-BlockTab:CreateToggle({
-	Name="Auto Block", CurrentValue=false, Flag="AB_On",
-	Callback=function(v) ABOn=v; if v then startCombatHooks() end end,
-})
+BlockTab:CreateToggle({Name="Auto Block", CurrentValue=false, Flag="AB_On",
+	Callback=function(v) ABOn=v; if v then startCombatHooks() end end})
 BlockTab:CreateToggle({Name="Ping Compensation", CurrentValue=true, Flag="AB_Ping",
 	Callback=function(v) pingComp=v end})
 BlockTab:CreateSlider({Name="Ping Compensation (ms)", Range={0,200}, Increment=5, Suffix="ms",
@@ -282,10 +291,8 @@ BlockTab:CreateButton({Name="Test BlockOff", Callback=function()
 end})
 
 TradeTab:CreateSection("M1 Trade")
-TradeTab:CreateToggle({
-	Name="M1 Trade", CurrentValue=false, Flag="MT_On",
-	Callback=function(v) tradeOn=v; if v then startCombatHooks() end end,
-})
+TradeTab:CreateToggle({Name="M1 Trade", CurrentValue=false, Flag="MT_On",
+	Callback=function(v) tradeOn=v; if v then startCombatHooks() end end})
 TradeTab:CreateSlider({Name="Delay After Block", Range={0,1}, Increment=0.01, Suffix="s",
 	CurrentValue=0.04, Flag="MT_Delay", Callback=function(v) tradeDelay=v end})
 TradeTab:CreateSection("Manual Test")
@@ -549,23 +556,19 @@ local function buildVisualizer()
 	saveBtn.TextColor3=Color3.fromRGB(20,20,20); saveBtn.BorderSizePixel=0; saveBtn.Parent=qp
 	local svc=Instance.new("UICorner"); svc.CornerRadius=UDim.new(0,3); svc.Parent=saveBtn
 
-	-- ===== Rig framing: compute bounding box and frame camera =====
 	local function frameRigToViewport(model)
 		if not model or not previewCamera or not previewViewport then return end
-		-- collect base parts
 		local parts = {}
 		for _, d in ipairs(model:GetDescendants()) do
 			if d:IsA("BasePart") then table.insert(parts, d) end
 		end
 		if #parts == 0 then return end
 
-		-- bbox
 		local minV = Vector3.new(math.huge,math.huge,math.huge)
 		local maxV = Vector3.new(-math.huge,-math.huge,-math.huge)
 		for _, p in ipairs(parts) do
 			local cf = p.CFrame
 			local sz = p.Size * 0.5
-			-- sample 8 corners in world
 			for sx = -1, 1, 2 do
 				for sy = -1, 1, 2 do
 					for sz2 = -1, 1, 2 do
@@ -579,20 +582,16 @@ local function buildVisualizer()
 		local center = (minV + maxV) * 0.5
 		local size = maxV - minV
 		local maxDim = math.max(size.X, size.Y, size.Z)
-		-- fov margin
 		local fov = previewCamera.FieldOfView
 		local aspect = previewViewport.AbsoluteSize.X / math.max(1, previewViewport.AbsoluteSize.Y)
-		-- vertical fov in radians
 		local vfov = math.rad(fov)
 		local hfov = 2 * math.atan(math.tan(vfov/2) * aspect)
 		local distV = (size.Y * 0.5) / math.tan(vfov/2)
 		local distH = (maxDim * 0.5) / math.tan(hfov/2)
 		local dist = math.max(distV, distH) * 1.35 + 2
-		-- slight downward + in front
 		local lookAt = center
 		local camPos = center + Vector3.new(0, size.Y * 0.10, -dist)
 		previewCamera.CFrame = CFrame.new(camPos, lookAt)
-		previewCamera.FieldOfView = math.clamp(fov, 30, 100)
 	end
 	getgenv().OutlawFrameRig = frameRigToViewport
 
@@ -613,11 +612,8 @@ local function buildVisualizer()
 			end
 		end
 		clone.Parent = previewWorld
-		-- anchor everything so it stays put and the viewport can frame it
 		for _, p in ipairs(clone:GetDescendants()) do
-			if p:IsA("BasePart") then
-				p.Anchored = true
-			end
+			if p:IsA("BasePart") then p.Anchored = true end
 		end
 		local hrp = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
 		local torso = clone:FindFirstChild("Torso") or clone:FindFirstChild("UpperTorso") or clone:FindFirstChild("LowerTorso")
@@ -634,7 +630,6 @@ local function buildVisualizer()
 			previewHum = hum
 		end
 		previewRig = clone
-		-- wait a frame for CFrame propagation, then frame
 		task.defer(function()
 			task.wait(0.05)
 			if getgenv().OutlawAutoFit and previewRig then
@@ -646,11 +641,9 @@ local function buildVisualizer()
 
 	buildRig()
 
-	-- rewire character change: rebuild rig AND self logger
 	LP.CharacterAdded:Connect(function()
 		task.wait(0.75)
 		buildRig()
-		-- reframe after the rig settles
 		task.wait(0.5)
 		if getgenv().OutlawAutoFit and previewRig then
 			frameRigToViewport(previewRig)
@@ -1059,7 +1052,7 @@ end
 task.spawn(function() task.wait(1.8); buildSelfLogger() end)
 
 -- ============================================================
--- SELF HOOK (per-character, robust against respawn)
+-- SELF HOOK
 -- ============================================================
 local selfConnByHum = {}
 
@@ -1110,7 +1103,6 @@ function hookSelfLogger()
 	end
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	if not hum then
-		-- wait for humanoid
 		task.spawn(function()
 			local t=0
 			while char.Parent and not hum and t<5 do
@@ -1125,7 +1117,6 @@ function hookSelfLogger()
 end
 
 function unhookSelfLogger()
-	-- we do not disconnect by default so re-enabling is instant, but drop stale hums
 	for hum, conn in pairs(selfConnByHum) do
 		if not hum.Parent then
 			pcall(function() conn:Disconnect() end)
@@ -1135,9 +1126,7 @@ function unhookSelfLogger()
 	end
 end
 
--- Hard rewire on every respawn: drop old state, reattach after char loads.
 LP.CharacterAdded:Connect(function(newChar)
-	-- clear per-character hook state so we attach fresh
 	for hum, conn in pairs(selfConnByHum) do
 		if hum.Parent ~= newChar then
 			pcall(function() conn:Disconnect() end)
@@ -1145,7 +1134,6 @@ LP.CharacterAdded:Connect(function(newChar)
 			selfLogHooked[hum]=nil
 		end
 	end
-	-- wait for the Animator to exist on the new character
 	task.spawn(function()
 		local t=0
 		local hum
@@ -1155,7 +1143,6 @@ LP.CharacterAdded:Connect(function(newChar)
 			if hum and hum:FindFirstChildOfClass("Animator") then break end
 		end
 		if hum then
-			-- small settle delay so the default idle has already fired and been filtered
 			task.wait(0.4)
 			if selfLogOn then attachSelfAnimator(hum) end
 		end
@@ -1234,4 +1221,6 @@ end)
 
 startCombatHooks()
 
-Airflow:Notify("outlaw.dev", "Loaded v3. Jump/dodge removed. Rig auto-frames. Self logger survives respawn.", 6)
+pcall(function()
+	Airflow:Notify("outlaw.dev", "Loaded v4. Loadstring inline. Airflow resolution hardened.", 6)
+end)
