@@ -106,17 +106,14 @@ local forcedLock = nil
 local autoRejoin = false
 local rejoinConn = nil
 
--- Block Builder state (enemy logger)
 local logRange = 120
 local logHooked = {}
 local loggerWin, loggerScroll, loggerTitle, loggerRows = nil, nil, nil, {}
 
--- Player Block Builder state (own logger)
 local myLogRange = 120
 local myLogHooked = {}
 local myLoggerWin, myLoggerScroll, myLoggerTitle, myLoggerRows = nil, nil, nil, {}
 
--- Visualizer state
 local currentId = nil
 local currentTrack = nil
 local currentDuration = 0
@@ -126,8 +123,8 @@ local loopPlayback = true
 local previewRig, previewHum, previewWorld, previewViewport, previewCamera
 local visGui, combined
 
--- Deferred visualizer select (set after visualizer builds)
 local pendingSelectAnim = nil
+local buildVisualizer
 
 local skipNames = {
 	WalkAnim = true, JumpAnim = true, RunAnim = true, SwimAnim = true,
@@ -181,13 +178,25 @@ local comboEndIds = {
 
 local headRideAnimId = "rbxassetid://1461137417"
 
--- Universal select: routes to visualizer, queues if not built yet.
 local function selectAnim(id)
 	if not id then return end
-	if getgenv().OutlawSelectAnim then
-		getgenv().OutlawSelectAnim(id)
-	else
-		pendingSelectAnim = id
+	local fn = getgenv().OutlawSelectAnim
+	if type(fn) == "function" then
+		local ok2 = pcall(fn, id)
+		if ok2 then return end
+	end
+	pendingSelectAnim = id
+	if not (getgenv().OutlawVisualizer and getgenv().OutlawVisualizer.Parent) then
+		if buildVisualizer then
+			task.spawn(function()
+				pcall(buildVisualizer)
+				if pendingSelectAnim and getgenv().OutlawSelectAnim then
+					local pid = pendingSelectAnim
+					pendingSelectAnim = nil
+					pcall(getgenv().OutlawSelectAnim, pid)
+				end
+			end)
+		end
 	end
 end
 
@@ -915,7 +924,29 @@ local function buildLogger()
 	closeBtn.BorderSizePixel = 0
 	closeBtn.Parent = loggerWin
 	local lxc = Instance.new("UICorner") lxc.CornerRadius = UDim.new(0, 3) lxc.Parent = closeBtn
-	closeBtn.MouseButton1Click:Connect(function() loggerWin.Visible = false end)
+
+	local reopenBtn = Instance.new("TextButton")
+	reopenBtn.Size = UDim2.new(0, 120, 0, 22)
+	reopenBtn.Position = UDim2.new(0, 12, 0, 80)
+	reopenBtn.BackgroundColor3 = Color3.fromRGB(30, 26, 16)
+	reopenBtn.Text = "Block Builder"
+	reopenBtn.Font = Enum.Font.GothamBold
+	reopenBtn.TextSize = 11
+	reopenBtn.TextColor3 = Color3.fromRGB(230, 210, 160)
+	reopenBtn.BorderSizePixel = 0
+	reopenBtn.Visible = false
+	reopenBtn.Parent = gui
+	local rbc = Instance.new("UICorner") rbc.CornerRadius = UDim.new(0, 3) rbc.Parent = reopenBtn
+	local rbs = Instance.new("UIStroke") rbs.Color = Color3.fromRGB(140, 100, 40) rbs.Thickness = 1 rbs.Parent = reopenBtn
+
+	closeBtn.MouseButton1Click:Connect(function()
+		loggerWin.Visible = false
+		reopenBtn.Visible = true
+	end)
+	reopenBtn.MouseButton1Click:Connect(function()
+		loggerWin.Visible = true
+		reopenBtn.Visible = false
+	end)
 
 	local headerRow = Instance.new("Frame")
 	headerRow.Size = UDim2.new(1, -16, 0, 18)
@@ -967,6 +998,7 @@ local function buildLogger()
 	end)
 
 	getgenv().OutlawLogger = loggerWin
+	getgenv().OutlawLoggerReopen = reopenBtn
 end
 
 local function addLogRow(id, name, source, dist)
@@ -1087,7 +1119,29 @@ local function buildMyLogger()
 	closeBtn.BorderSizePixel = 0
 	closeBtn.Parent = myLoggerWin
 	local mlxc = Instance.new("UICorner") mlxc.CornerRadius = UDim.new(0, 3) mlxc.Parent = closeBtn
-	closeBtn.MouseButton1Click:Connect(function() myLoggerWin.Visible = false end)
+
+	local reopenBtn = Instance.new("TextButton")
+	reopenBtn.Size = UDim2.new(0, 150, 0, 22)
+	reopenBtn.Position = UDim2.new(0, 12, 0, 108)
+	reopenBtn.BackgroundColor3 = Color3.fromRGB(16, 24, 32)
+	reopenBtn.Text = "Player Block Builder"
+	reopenBtn.Font = Enum.Font.GothamBold
+	reopenBtn.TextSize = 11
+	reopenBtn.TextColor3 = Color3.fromRGB(160, 210, 240)
+	reopenBtn.BorderSizePixel = 0
+	reopenBtn.Visible = false
+	reopenBtn.Parent = gui
+	local rbc = Instance.new("UICorner") rbc.CornerRadius = UDim.new(0, 3) rbc.Parent = reopenBtn
+	local rbs = Instance.new("UIStroke") rbs.Color = Color3.fromRGB(60, 110, 150) rbs.Thickness = 1 rbs.Parent = reopenBtn
+
+	closeBtn.MouseButton1Click:Connect(function()
+		myLoggerWin.Visible = false
+		reopenBtn.Visible = true
+	end)
+	reopenBtn.MouseButton1Click:Connect(function()
+		myLoggerWin.Visible = true
+		reopenBtn.Visible = false
+	end)
 
 	local headerRow = Instance.new("Frame")
 	headerRow.Size = UDim2.new(1, -16, 0, 18)
@@ -1137,6 +1191,7 @@ local function buildMyLogger()
 	end)
 
 	getgenv().OutlawMyLogger = myLoggerWin
+	getgenv().OutlawMyLoggerReopen = reopenBtn
 	getgenv().OutlawMyLoggerClear = function()
 		for _, r in ipairs(myLoggerRows) do
 			if r and r.Parent then r:Destroy() end
@@ -1283,12 +1338,7 @@ end
 -- =============================================================
 -- VISUALIZER BUILD
 -- =============================================================
-local function buildVisualizer()
-	if getgenv().OutlawVisualizer and getgenv().OutlawVisualizer.Parent then
-		combined = getgenv().OutlawVisualizer
-		return
-	end
-
+function buildVisualizer()
 	local existingGui = nil
 	for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
 		if g then
@@ -1297,6 +1347,8 @@ local function buildVisualizer()
 		end
 	end
 	if existingGui then pcall(function() existingGui:Destroy() end) end
+	getgenv().OutlawVisualizer = nil
+	getgenv().OutlawSelectAnim = nil
 
 	visGui = Instance.new("ScreenGui")
 	visGui.Name = "OutlawVisualizer"
@@ -2239,6 +2291,7 @@ BlockBuilderTab:CreateToggle({
 	Flag = "IL_Show",
 	Callback = function(v)
 		if getgenv().OutlawLogger then getgenv().OutlawLogger.Visible = v end
+		if getgenv().OutlawLoggerReopen then getgenv().OutlawLoggerReopen.Visible = not v end
 	end,
 })
 BlockBuilderTab:CreateSection("Log Range")
@@ -2278,6 +2331,7 @@ MyLoggerTab:CreateToggle({
 	Flag = "ML_Show",
 	Callback = function(v)
 		if getgenv().OutlawMyLogger then getgenv().OutlawMyLogger.Visible = v end
+		if getgenv().OutlawMyLoggerReopen then getgenv().OutlawMyLoggerReopen.Visible = not v end
 	end,
 })
 MyLoggerTab:CreateToggle({
@@ -2536,6 +2590,36 @@ task.spawn(function()
 	end)
 end)
 
-startCombatHooks()
+-- Combat hook bootstrap
+scanAll()
+local bootLive = workspace:FindFirstChild("Live")
+if bootLive then
+	bootLive.ChildAdded:Connect(function(c)
+		if c:IsA("Model") then
+			local h = c:FindFirstChildOfClass("Humanoid")
+			if h then hookHumanoid(h) end
+		end
+	end)
+end
+workspace.DescendantAdded:Connect(function(o)
+	if o:IsA("Humanoid") then
+		local m = o.Parent
+		local mc = LP.Character
+		if not (m and mc and m == mc) then hookHumanoid(o) end
+	elseif o:IsA("Animator") then
+		local h = o.Parent
+		if h and h:IsA("Humanoid") then hookHumanoid(h) end
+	end
+end)
+Players.PlayerAdded:Connect(function(plr)
+	plr.CharacterAdded:Connect(function(c)
+		local h = c:WaitForChild("Humanoid", 5)
+		if h then hookHumanoid(h) end
+	end)
+end)
+LP.CharacterAdded:Connect(function()
+	task.wait(1)
+	if headRideOn then hookMyAnimator() end
+end)
 
 Airflow:Notify("outlaw.dev", "Loaded. Farm + Block + Trade + Head Ride + Nanami + Yuji + Visualizer + Loggers.", 5)
