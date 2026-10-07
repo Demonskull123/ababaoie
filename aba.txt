@@ -1,5 +1,5 @@
 --!strict
--- outlaw.dev — Auto Farm + Auto Block + M1 Trade + Head Ride + Nanami + Yuji + Recorder + Visualizer + Player + Misc
+-- outlaw.dev — Auto Farm + Auto Block + M1 Trade + Head Ride + Nanami + Yuji + Info Logger + My Logger + Player + Misc
 
 local AirflowSrc = "https://raw.githubusercontent.com/PookiePepelsss/Airflow-UI/refs/heads/main/Source.luau"
 
@@ -22,10 +22,9 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 
--- Clean stale GUIs from prior sessions
 for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
 	if g then
-		for _, n in ipairs({"OutlawVisualizer", "outlawPreview"}) do
+		for _, n in ipairs({"OutlawInfoLogger", "OutlawMyLogger", "OutlawVisualizer"}) do
 			local ex = g:FindFirstChild(n)
 			if ex then pcall(function() ex:Destroy() end) end
 		end
@@ -107,29 +106,45 @@ local forcedLock = nil
 local autoRejoin = false
 local rejoinConn = nil
 
-local recorderOn = false
-local recorderLog = {}
-local recorderConns = {}
-local recorderHooked = {}
-local recorderWatcher = nil
-local recorderSkipMove = true
-local recorderSkipIds = {
-	["rbxassetid://507766666"] = true,
-	["rbxassetid://507766951"] = true,
-	["rbxassetid://507766388"] = true,
-	["rbxassetid://507777826"] = true,
-	["rbxassetid://507767714"] = true,
-	["rbxassetid://507784897"] = true,
-	["rbxassetid://507785072"] = true,
-	["rbxassetid://507797819"] = true,
-	["rbxassetid://507797826"] = true,
+-- Logger state
+local logRange = 120
+local logHooked = {}
+local loggerWin, loggerScroll, loggerTitle, loggerRows = nil, nil, nil, {}
+
+local myLogRange = 120
+local myLogHooked = {}
+local myLoggerWin, myLoggerScroll, myLoggerTitle, myLoggerRows = nil, nil, nil, {}
+
+local skipNames = {
+	WalkAnim = true, JumpAnim = true, RunAnim = true, SwimAnim = true,
+	IdleAnim = true, FallAnim = true, SwimIdleAnim = true, ClimbAnim = true,
+	Walk = true, Jump = true, Run = true, Swim = true,
+	Idle = true, Fall = true, SwimIdle = true, Climb = true,
+	Walking = true, Jumping = true, Running = true, Swimming = true,
+	Idling = true, Falling = true, SwimIdling = true, Climbing = true,
+	walk = true, jump = true, run = true, swim = true,
+	idle = true, fall = true, climb = true,
 }
 
-local previewRig = nil
-local previewHum = nil
-local previewTrack = nil
-local previewFrame = nil
-local previewLabel = nil
+local defaultAnimIdFrags = {
+	"507766", "507777", "507797",
+	"180435571", "180435792",
+	"125750702", "125749238",
+	"180436148", "180436334",
+	"125751086", "125750609",
+	"180436552", "180436678",
+	"507771019", "507770818",
+	"507767714", "507768375",
+	"507770239", "507770453",
+}
+
+local function isLocomotion(id, name)
+	if name and skipNames[name] then return true end
+	for _, frag in ipairs(defaultAnimIdFrags) do
+		if id:find(frag) then return true end
+	end
+	return false
+end
 
 local atkIds = {
 	["rbxassetid://1461128166"] = true,
@@ -152,16 +167,6 @@ local comboEndIds = {
 
 local headRideAnimId = "rbxassetid://1461137417"
 
--- ===== VISUALIZER STATE =====
-local currentId = nil
-local currentTrack = nil
-local currentDuration = 0
-local playbackSpeed = 1
-local paused = false
-local loopPlayback = true
-local previewWorldVis, previewViewportVis, previewCameraVis
-local visGui, combined
-
 local function getInput()
 	local bp = LP:FindFirstChild("Backpack")
 	if bp then
@@ -182,9 +187,7 @@ local function getInput()
 		if inp and inp:IsA("RemoteEvent") then return inp end
 	end
 	for _, v in ipairs(LP:GetDescendants()) do
-		if v:IsA("RemoteEvent") and v.Name == "Input" then
-			return v
-		end
+		if v:IsA("RemoteEvent") and v.Name == "Input" then return v end
 	end
 	return nil
 end
@@ -243,16 +246,8 @@ local function fireM1()
 		lookDir = root and root.CFrame.LookVector or Vector3.new(0, 0, -1)
 	end
 	local mouseHit = CFrame.new(hitPos, hitPos + lookDir)
-	local down = {
-		[1] = "M1",
-		[2] = {air = false, md = Vector3.new(0, 0, 0), mousehit = mouseHit, skeydown = true, skeyreal = false},
-		n = 2,
-	}
-	local up = {
-		[1] = "M1",
-		[2] = {air = false, md = Vector3.new(0, 0, 0), mousehit = mouseHit, skeydown = false, skeyreal = true},
-		n = 2,
-	}
+	local down = {[1]="M1",[2]={air=false,md=Vector3.new(0,0,0),mousehit=mouseHit,skeydown=true,skeyreal=false},n=2}
+	local up = {[1]="M1",[2]={air=false,md=Vector3.new(0,0,0),mousehit=mouseHit,skeydown=false,skeyreal=true},n=2}
 	pcall(function() input:FireServer(unpack(down, 1, down.n or #down)) end)
 	task.wait(0.05)
 	pcall(function() input:FireServer(unpack(up, 1, up.n or #up)) end)
@@ -285,13 +280,9 @@ local function fireSkillRemote()
 end
 
 local function fireSkillByMode()
-	if yujiMode == "In-Game M1" then
-		fireM1()
-	elseif yujiMode == "Virtual Attack" then
-		virtualClick()
-	elseif yujiMode == "UseMove Remote" then
-		fireSkillRemote()
-	end
+	if yujiMode == "In-Game M1" then fireM1()
+	elseif yujiMode == "Virtual Attack" then virtualClick()
+	elseif yujiMode == "UseMove Remote" then fireSkillRemote() end
 end
 
 function stopHeadRide()
@@ -354,28 +345,14 @@ local function waitForHitThenRide()
 	local targetModel = best.Parent
 	local startHealth = best.Health
 	local startTags = {}
-	for _, c in ipairs(targetModel:GetChildren()) do
-		startTags[c.Name] = true
-	end
+	for _, c in ipairs(targetModel:GetChildren()) do startTags[c.Name] = true end
 	local conn
 	local startTime = tick()
 	conn = RunService.Heartbeat:Connect(function()
-		if not headRideOn then
-			conn:Disconnect()
-			headRidePending = false
-			return
-		end
-		if tick() - startTime > 0.6 then
-			conn:Disconnect()
-			headRidePending = false
-			return
-		end
+		if not headRideOn then conn:Disconnect() headRidePending = false return end
+		if tick() - startTime > 0.6 then conn:Disconnect() headRidePending = false return end
 		local hum = targetModel:FindFirstChildOfClass("Humanoid")
-		if not hum then
-			conn:Disconnect()
-			headRidePending = false
-			return
-		end
+		if not hum then conn:Disconnect() headRidePending = false return end
 		local hit = hum.Health < startHealth
 		if not hit then
 			for _, c in ipairs(targetModel:GetChildren()) do
@@ -465,15 +442,10 @@ end
 local function farmPositionCFrame(targetRoot)
 	local pos = targetRoot.Position
 	local look = targetRoot.CFrame.LookVector
-	if farmPosMode == "On Top" then
-		return CFrame.new(pos + Vector3.new(0, 4, 0))
-	elseif farmPosMode == "Below" then
-		return CFrame.new(pos - Vector3.new(0, 4, 0))
-	elseif farmPosMode == "Behind" then
-		return CFrame.new(pos - look * 4, pos)
-	elseif farmPosMode == "In Front" then
-		return CFrame.new(pos + look * 4, pos)
-	end
+	if farmPosMode == "On Top" then return CFrame.new(pos + Vector3.new(0, 4, 0))
+	elseif farmPosMode == "Below" then return CFrame.new(pos - Vector3.new(0, 4, 0))
+	elseif farmPosMode == "Behind" then return CFrame.new(pos - look * 4, pos)
+	elseif farmPosMode == "In Front" then return CFrame.new(pos + look * 4, pos) end
 	return CFrame.new(pos)
 end
 
@@ -528,9 +500,7 @@ local function farmLoop()
 	end)
 	farmSkillLoop = task.spawn(function()
 		while farmOn do
-			if farmTarget and farmTarget.Parent then
-				fireNextFarmSkill()
-			end
+			if farmTarget and farmTarget.Parent then fireNextFarmSkill() end
 			task.wait(farmSkillDelay)
 		end
 	end)
@@ -608,9 +578,7 @@ local function scanAll()
 	for _, o in ipairs(workspace:GetDescendants()) do
 		if o:IsA("Humanoid") then
 			local m = o.Parent
-			if not (m and myChar and m == myChar) then
-				hookHumanoid(o)
-			end
+			if not (m and myChar and m == myChar) then hookHumanoid(o) end
 		end
 	end
 end
@@ -692,9 +660,7 @@ end
 
 local function bindNanamiChar(c)
 	if not c then return end
-	c:GetAttributeChangedSignal("NANAMIAIM"):Connect(function()
-		nanamiFired = false
-	end)
+	c:GetAttributeChangedSignal("NANAMIAIM"):Connect(function() nanamiFired = false end)
 end
 
 local function yujiTick()
@@ -763,237 +729,13 @@ local function lockTick()
 	myRoot.CFrame = CFrame.lookAt(p, Vector3.new(t.X, p.Y, t.Z))
 end
 
-local function nameLooksLikeMovement(name)
-	if not name then return false end
-	local n = name:lower()
-	return n:find("run") or n:find("walk") or n:find("idle") or
-	       n:find("jump") or n:find("fall") or n:find("swim") or
-	       n:find("climb") or n:find("sit")
-end
-
--- ===== RECORDER PREVIEW (small corner window) =====
-local function setupPreviewRig()
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "outlawPreview"
-	gui.IgnoreGuiInset = true
-	gui.ResetOnSpawn = false
-	gui.Parent = LP:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
-
-	local frame = Instance.new("Frame")
-	frame.Name = "PreviewFrame"
-	frame.Size = UDim2.new(0, 260, 0, 320)
-	frame.Position = UDim2.new(1, -280, 1, -360)
-	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	frame.BackgroundTransparency = 0.15
-	frame.BorderSizePixel = 0
-	frame.Visible = false
-	frame.Parent = gui
-
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = frame
-
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, 0, 0, 24)
-	title.BackgroundTransparency = 1
-	title.Text = "Preview"
-	title.TextColor3 = Color3.fromRGB(255, 255, 255)
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 14
-	title.Parent = frame
-
-	local closeBtn = Instance.new("TextButton")
-	closeBtn.Size = UDim2.new(0, 24, 0, 24)
-	closeBtn.Position = UDim2.new(1, -28, 0, 2)
-	closeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-	closeBtn.Text = "X"
-	closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-	closeBtn.Font = Enum.Font.GothamBold
-	closeBtn.TextSize = 12
-	closeBtn.BorderSizePixel = 0
-	closeBtn.Parent = frame
-	closeBtn.MouseButton1Click:Connect(function() frame.Visible = false end)
-
-	local vp = Instance.new("ViewportFrame")
-	vp.Size = UDim2.new(1, -16, 1, -70)
-	vp.Position = UDim2.new(0, 8, 0, 30)
-	vp.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-	vp.BorderSizePixel = 0
-	vp.Parent = frame
-
-	local vpCorner = Instance.new("UICorner")
-	vpCorner.CornerRadius = UDim.new(0, 6)
-	vpCorner.Parent = vp
-
-	local cam = Instance.new("Camera")
-	cam.CFrame = CFrame.new(Vector3.new(0, 3, -7), Vector3.new(0, 2.5, 0))
-	cam.Parent = vp
-	vp.CurrentCamera = cam
-
-	local world = Instance.new("WorldModel")
-	world.Parent = vp
-
-	local clone
-	local char = LP.Character
-	if char then
-		clone = char:Clone()
-		clone.Name = "PreviewRig"
-		for _, d in ipairs(clone:GetDescendants()) do
-			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("Sound") or d:IsA("ParticleEmitter") then
-				d:Destroy()
-			end
-		end
-		local root = clone:FindFirstChild("HumanoidRootPart")
-		if root then root.Anchored = true end
-		clone.Parent = world
-	end
-
-	local hum = clone and clone:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-		local oldAnim = hum:FindFirstChildOfClass("Animator")
-		if oldAnim then oldAnim:Destroy() end
-		local animator = Instance.new("Animator")
-		animator.Parent = hum
-	end
-
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, -16, 0, 30)
-	label.Position = UDim2.new(0, 8, 1, -38)
-	label.BackgroundTransparency = 1
-	label.Text = "(no animation)"
-	label.TextColor3 = Color3.fromRGB(200, 200, 200)
-	label.Font = Enum.Font.Gotham
-	label.TextSize = 11
-	label.TextWrapped = true
-	label.Parent = frame
-
-	previewFrame = frame
-	previewLabel = label
-	previewRig = clone
-	previewHum = hum
-end
-
-local function previewAnim(id, modelName)
-	if not previewFrame then return end
-	previewFrame.Visible = true
-	if previewTrack then
-		pcall(function() previewTrack:Stop() end)
-		previewTrack = nil
-	end
-	if not previewHum then return end
-	local anim = Instance.new("Animation")
-	anim.AnimationId = id
-	local ok2, track = pcall(function() return previewHum:LoadAnimation(anim) end)
-	if ok2 and track then
-		track.Looped = true
-		track:Play()
-		previewTrack = track
-	end
-	if previewLabel then
-		previewLabel.Text = (modelName or "?") .. " -> " .. id
-	end
-end
-
-pcall(setupPreviewRig)
-
-local function recorderAttachAnimator(animator)
-	if not animator or recorderHooked[animator] then return end
-	recorderHooked[animator] = true
-	local model = animator.Parent and animator.Parent.Parent
-	local conn = animator.AnimationPlayed:Connect(function(track)
-		if not recorderOn then return end
-		local anim = track.Animation
-		if not anim then return end
-		local id = anim.AnimationId
-		if not id or id == "" then return end
-		if recorderSkipMove then
-			if recorderSkipIds[id] then return end
-			if nameLooksLikeMovement(anim.Name) then return end
-		end
-		local entry = {time = os.clock(), model = model and model.Name or "?", id = id}
-		table.insert(recorderLog, entry)
-		if #recorderLog > 500 then table.remove(recorderLog, 1) end
-		print(string.format("[Recorder] %s -> %s", entry.model, id))
-	end)
-	table.insert(recorderConns, conn)
-end
-
-local function recorderScan()
-	for _, o in ipairs(workspace:GetDescendants()) do
-		if o:IsA("Animator") then
-			recorderAttachAnimator(o)
-		end
-	end
-end
-
-local function recorderStart()
-	if recorderOn then return end
-	recorderOn = true
-	recorderScan()
-	recorderWatcher = workspace.DescendantAdded:Connect(function(o)
-		if not recorderOn then return end
-		if o:IsA("Animator") then
-			recorderAttachAnimator(o)
-		end
-	end)
-end
-
-local function recorderStop()
-	recorderOn = false
-	if recorderWatcher then
-		recorderWatcher:Disconnect()
-		recorderWatcher = nil
-	end
-	for _, c in ipairs(recorderConns) do
-		pcall(function() c:Disconnect() end)
-	end
-	table.clear(recorderConns)
-	table.clear(recorderHooked)
-end
-
-local function recorderToText()
-	local lines = {}
-	for _, e in ipairs(recorderLog) do
-		table.insert(lines, string.format("%s -> %s", e.model, e.id))
-	end
-	return table.concat(lines, "\n")
-end
-
-local function recorderIdsOnly()
-	local seen = {}
-	local ordered = {}
-	for _, e in ipairs(recorderLog) do
-		if not seen[e.id] then
-			seen[e.id] = true
-			table.insert(ordered, e.id)
-		end
-	end
-	local lines = { "local atkIds = {" }
-	for _, id in ipairs(ordered) do
-		table.insert(lines, string.format('\t["%s"] = true,', id))
-	end
-	table.insert(lines, "}")
-	return table.concat(lines, "\n")
-end
-
-local function copyText(txt, label)
-	if setclipboard then
-		setclipboard(txt)
-		Airflow:Notify("outlaw.dev", label or "Copied", 2)
-	else
-		print(txt)
-		Airflow:Notify("outlaw.dev", "Printed to F9 (no setclipboard)", 3)
-	end
-end
-
 local function doRejoin()
 	pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
 end
 
 local function doServerHop()
 	task.spawn(function()
-		local success, err = pcall(function()
+		local success = pcall(function()
 			local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
 			local res = game:HttpGet(url)
 			local data = HttpService:JSONDecode(res)
@@ -1007,15 +749,13 @@ local function doServerHop()
 			end
 			TeleportService:Teleport(game.PlaceId, LP)
 		end)
-		if not success then
-			pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
-		end
+		if not success then pcall(function() TeleportService:Teleport(game.PlaceId, LP) end) end
 	end)
 end
 
 local function doJoinLowest()
 	task.spawn(function()
-		local success, err = pcall(function()
+		local success = pcall(function()
 			local cursor = ""
 			local bestId = nil
 			local bestCount = math.huge
@@ -1045,9 +785,7 @@ local function doJoinLowest()
 				TeleportService:Teleport(game.PlaceId, LP)
 			end
 		end)
-		if not success then
-			pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
-		end
+		if not success then pcall(function() TeleportService:Teleport(game.PlaceId, LP) end) end
 	end)
 end
 
@@ -1076,462 +814,444 @@ LP.CharacterAdded:Connect(function()
 	end
 end)
 
--- ===== VISUALIZER BUILD =====
-local function buildVisualizer()
-	if getgenv().OutlawVisualizer and getgenv().OutlawVisualizer.Parent then
-		combined = getgenv().OutlawVisualizer
-		return
-	end
+-- =============================================================
+-- INFO LOGGER (enemies only)
+-- =============================================================
+local function buildLogger()
+	if getgenv().OutlawLogger and getgenv().OutlawLogger.Parent then return end
+
 	local existingGui = nil
 	for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
 		if g then
-			local e = g:FindFirstChild("OutlawVisualizer")
+			local e = g:FindFirstChild("OutlawInfoLogger")
 			if e then existingGui = e break end
 		end
 	end
 	if existingGui then pcall(function() existingGui:Destroy() end) end
 
-	visGui = Instance.new("ScreenGui")
-	visGui.Name = "OutlawVisualizer"
-	visGui.ResetOnSpawn = false
-	visGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	pcall(function() visGui.Parent = gethui() end)
-	if not visGui.Parent then pcall(function() visGui.Parent = game:GetService("CoreGui") end) end
-	if not visGui.Parent then visGui.Parent = LP:WaitForChild("PlayerGui") end
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "OutlawInfoLogger"
+	gui.ResetOnSpawn = false
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	pcall(function() gui.Parent = gethui() end)
+	if not gui.Parent then pcall(function() gui.Parent = game:GetService("CoreGui") end) end
+	if not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 
-	combined = Instance.new("Frame")
-	combined.Name = "VisualizerWindow"
-	combined.Size = UDim2.new(0, 620, 0, 400)
-	combined.Position = UDim2.new(0.5, -310, 0.5, -200)
-	combined.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-	combined.BorderSizePixel = 0
-	combined.Active = true
-	combined.Draggable = true
-	combined.Visible = false
-	combined.Parent = visGui
-	local wc = Instance.new("UICorner") wc.CornerRadius = UDim.new(0, 4) wc.Parent = combined
-	local ws = Instance.new("UIStroke") ws.Color = Color3.fromRGB(60, 60, 60) ws.Thickness = 1 ws.Parent = combined
+	local screenW = workspace.CurrentCamera.ViewportSize.X
+	local screenH = workspace.CurrentCamera.ViewportSize.Y
+	local winW, winH = 440, 340
+	local cx = math.floor((screenW - winW) / 2 - 220)
+	if cx < 12 then cx = 12 end
+	local cy = math.floor((screenH - winH) / 2)
 
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, -20, 0, 20)
-	title.Position = UDim2.new(0, 10, 0, 3)
-	title.BackgroundTransparency = 1
-	title.Text = "Animation Visualizer & Editor"
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 12
-	title.TextColor3 = Color3.fromRGB(230, 230, 230)
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.Parent = combined
+	loggerWin = Instance.new("Frame")
+	loggerWin.Name = "InfoLogger"
+	loggerWin.Size = UDim2.new(0, winW, 0, winH)
+	loggerWin.Position = UDim2.new(0, cx, 0, cy)
+	loggerWin.BackgroundColor3 = Color3.fromRGB(20, 18, 12)
+	loggerWin.BorderSizePixel = 0
+	loggerWin.Active = true
+	loggerWin.Draggable = true
+	loggerWin.Visible = true
+	loggerWin.Parent = gui
+	local lc = Instance.new("UICorner") lc.CornerRadius = UDim.new(0, 4) lc.Parent = loggerWin
+	local ls = Instance.new("UIStroke") ls.Color = Color3.fromRGB(140, 100, 40) ls.Thickness = 1 ls.Parent = loggerWin
 
-	local closeX = Instance.new("TextButton")
-	closeX.Size = UDim2.new(0, 20, 0, 18)
-	closeX.Position = UDim2.new(1, -24, 0, 3)
-	closeX.BackgroundTransparency = 1
-	closeX.Text = "X"
-	closeX.Font = Enum.Font.GothamBold
-	closeX.TextSize = 12
-	closeX.TextColor3 = Color3.fromRGB(220, 220, 220)
-	closeX.BorderSizePixel = 0
-	closeX.Parent = combined
-	closeX.MouseButton1Click:Connect(function() combined.Visible = false end)
+	loggerTitle = Instance.new("TextLabel")
+	loggerTitle.Size = UDim2.new(1, -100, 0, 22)
+	loggerTitle.Position = UDim2.new(0, 10, 0, 4)
+	loggerTitle.BackgroundTransparency = 1
+	loggerTitle.Text = "Info Logger     0 Entries"
+	loggerTitle.Font = Enum.Font.GothamBold
+	loggerTitle.TextSize = 12
+	loggerTitle.TextColor3 = Color3.fromRGB(230, 210, 160)
+	loggerTitle.TextXAlignment = Enum.TextXAlignment.Left
+	loggerTitle.Parent = loggerWin
 
-	previewViewportVis = Instance.new("ViewportFrame")
-	previewViewportVis.Size = UDim2.new(0, 400, 0, 270)
-	previewViewportVis.Position = UDim2.new(0, 10, 0, 26)
-	previewViewportVis.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	previewViewportVis.BorderSizePixel = 0
-	previewViewportVis.Parent = combined
-	local vc = Instance.new("UICorner") vc.CornerRadius = UDim.new(0, 2) vc.Parent = previewViewportVis
-	local vs = Instance.new("UIStroke") vs.Color = Color3.fromRGB(80, 80, 80) vs.Thickness = 1 vs.Parent = previewViewportVis
+	local clearBtn = Instance.new("TextButton")
+	clearBtn.Size = UDim2.new(0, 50, 0, 18)
+	clearBtn.Position = UDim2.new(1, -78, 0, 6)
+	clearBtn.BackgroundColor3 = Color3.fromRGB(70, 60, 40)
+	clearBtn.Text = "Clear"
+	clearBtn.Font = Enum.Font.Gotham
+	clearBtn.TextSize = 11
+	clearBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+	clearBtn.BorderSizePixel = 0
+	clearBtn.Parent = loggerWin
+	local lcc = Instance.new("UICorner") lcc.CornerRadius = UDim.new(0, 3) lcc.Parent = clearBtn
 
-	previewCameraVis = Instance.new("Camera")
-	previewCameraVis.CFrame = CFrame.new(Vector3.new(0, 4, -16), Vector3.new(0, 3, 0))
-	previewCameraVis.FieldOfView = 60
-	previewCameraVis.Parent = previewViewportVis
-	previewViewportVis.CurrentCamera = previewCameraVis
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0, 18, 0, 18)
+	closeBtn.Position = UDim2.new(1, -24, 0, 6)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(70, 50, 30)
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 11
+	closeBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+	closeBtn.BorderSizePixel = 0
+	closeBtn.Parent = loggerWin
+	local lxc = Instance.new("UICorner") lxc.CornerRadius = UDim.new(0, 3) lxc.Parent = closeBtn
+	closeBtn.MouseButton1Click:Connect(function() loggerWin.Visible = false end)
 
-	previewWorldVis = Instance.new("WorldModel")
-	previewWorldVis.Parent = previewViewportVis
+	local headerRow = Instance.new("Frame")
+	headerRow.Size = UDim2.new(1, -16, 0, 18)
+	headerRow.Position = UDim2.new(0, 8, 0, 28)
+	headerRow.BackgroundTransparency = 1
+	headerRow.Parent = loggerWin
 
-	local plate = Instance.new("Part")
-	plate.Name = "PreviewFloor"
-	plate.Size = Vector3.new(30, 0.2, 30)
-	plate.Position = Vector3.new(0, -0.1, 0)
-	plate.Anchored = true
-	plate.CanCollide = false
-	plate.Color = Color3.fromRGB(60, 60, 60)
-	plate.Material = Enum.Material.SmoothPlastic
-	plate.Parent = previewWorldVis
-
-	local idBar = Instance.new("TextLabel")
-	idBar.Size = UDim2.new(0, 400, 0, 18)
-	idBar.Position = UDim2.new(0, 10, 0, 300)
-	idBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	idBar.BorderSizePixel = 0
-	idBar.Text = "rbxassetid://0"
-	idBar.Font = Enum.Font.Gotham
-	idBar.TextSize = 11
-	idBar.TextColor3 = Color3.fromRGB(200, 200, 200)
-	idBar.TextXAlignment = Enum.TextXAlignment.Left
-	idBar.Parent = combined
-	local ibr = Instance.new("UICorner") ibr.CornerRadius = UDim.new(0, 2) ibr.Parent = idBar
-	local idPad = Instance.new("UIPadding") idPad.PaddingLeft = UDim.new(0, 6) idPad.Parent = idBar
-
-	local scrubBg = Instance.new("Frame")
-	scrubBg.Size = UDim2.new(0, 400, 0, 12)
-	scrubBg.Position = UDim2.new(0, 10, 0, 322)
-	scrubBg.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-	scrubBg.BorderSizePixel = 0
-	scrubBg.Parent = combined
-	local sbc = Instance.new("UICorner") sbc.CornerRadius = UDim.new(0, 3) sbc.Parent = scrubBg
-	local scrubFill = Instance.new("Frame")
-	scrubFill.Size = UDim2.new(0, 0, 1, 0)
-	scrubFill.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
-	scrubFill.BorderSizePixel = 0
-	scrubFill.Parent = scrubBg
-	local sfc = Instance.new("UICorner") sfc.CornerRadius = UDim.new(0, 3) sfc.Parent = scrubFill
-
-	local timeLbl = Instance.new("TextLabel")
-	timeLbl.Size = UDim2.new(0, 400, 0, 14)
-	timeLbl.Position = UDim2.new(0, 10, 0, 338)
-	timeLbl.BackgroundTransparency = 1
-	timeLbl.Text = "0.000s / 0.000s"
-	timeLbl.Font = Enum.Font.Gotham
-	timeLbl.TextSize = 10
-	timeLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
-	timeLbl.TextXAlignment = Enum.TextXAlignment.Left
-	timeLbl.Parent = combined
-
-	local ctrlRow = Instance.new("Frame")
-	ctrlRow.Size = UDim2.new(0, 400, 0, 26)
-	ctrlRow.Position = UDim2.new(0, 10, 0, 358)
-	ctrlRow.BackgroundTransparency = 1
-	ctrlRow.Parent = combined
-
-	local function mkBtn(text, xo, w, col)
-		local b = Instance.new("TextButton")
-		b.Size = UDim2.new(0, w, 0, 24)
-		b.Position = UDim2.new(0, xo, 0, 0)
-		b.BackgroundColor3 = col
-		b.Text = text
-		b.Font = Enum.Font.GothamBold
-		b.TextSize = 11
-		b.TextColor3 = Color3.new(1, 1, 1)
-		b.BorderSizePixel = 0
-		b.Parent = ctrlRow
-		local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 3) c.Parent = b
-		return b
+	local function headLabel(text, xo, w)
+		local l = Instance.new("TextLabel")
+		l.Size = UDim2.new(0, w, 1, 0)
+		l.Position = UDim2.new(0, xo, 0, 0)
+		l.BackgroundTransparency = 1
+		l.Text = text
+		l.Font = Enum.Font.GothamBold
+		l.TextSize = 10
+		l.TextColor3 = Color3.fromRGB(220, 200, 140)
+		l.TextXAlignment = Enum.TextXAlignment.Left
+		l.Parent = headerRow
+		return l
 	end
 
-	local btnPlay = mkBtn("Play", 0, 70, Color3.fromRGB(50, 130, 50))
-	local btnPause = mkBtn("Pause", 76, 70, Color3.fromRGB(130, 100, 40))
-	local btnStop = mkBtn("Stop", 152, 70, Color3.fromRGB(140, 50, 50))
-	local btnSpeed = mkBtn("Speed 1x", 228, 80, Color3.fromRGB(60, 60, 90))
-	local btnLoop = mkBtn("Loop ON", 314, 86, Color3.fromRGB(70, 70, 100))
+	headLabel("Animation", 8, 140)
+	headLabel("ID", 155, 150)
+	headLabel("Enemy", 305, 70)
+	headLabel("Dist", 375, 50)
 
-	local qp = Instance.new("Frame")
-	qp.Name = "QuickEditPanel"
-	qp.Size = UDim2.new(0, 190, 0, 370)
-	qp.Position = UDim2.new(1, -200, 0, 26)
-	qp.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	qp.BorderSizePixel = 0
-	qp.Parent = combined
-	local qpc = Instance.new("UICorner") qpc.CornerRadius = UDim.new(0, 4) qpc.Parent = qp
-	local qps = Instance.new("UIStroke") qps.Color = Color3.fromRGB(60, 60, 60) qps.Thickness = 1 qps.Parent = qp
+	loggerScroll = Instance.new("ScrollingFrame")
+	loggerScroll.Size = UDim2.new(1, -16, 1, -54)
+	loggerScroll.Position = UDim2.new(0, 8, 0, 48)
+	loggerScroll.BackgroundTransparency = 1
+	loggerScroll.BorderSizePixel = 0
+	loggerScroll.ScrollBarThickness = 4
+	loggerScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	loggerScroll.Parent = loggerWin
 
-	local qTitle = Instance.new("TextLabel")
-	qTitle.Size = UDim2.new(1, -16, 0, 20)
-	qTitle.Position = UDim2.new(0, 8, 0, 3)
-	qTitle.BackgroundTransparency = 1
-	qTitle.Text = "Quick Edit Timing"
-	qTitle.Font = Enum.Font.GothamBold
-	qTitle.TextSize = 11
-	qTitle.TextColor3 = Color3.fromRGB(230, 230, 230)
-	qTitle.TextXAlignment = Enum.TextXAlignment.Left
-	qTitle.Parent = qp
-
-	local fields = {}
-	local yPos = 26
-	local function addField(name, default)
-		local row = Instance.new("Frame")
-		row.Size = UDim2.new(1, -12, 0, 22)
-		row.Position = UDim2.new(0, 6, 0, yPos)
-		row.BackgroundTransparency = 1
-		row.Parent = qp
-		local lbl = Instance.new("TextLabel")
-		lbl.Size = UDim2.new(0, 86, 1, 0)
-		lbl.BackgroundTransparency = 1
-		lbl.Text = name .. ":"
-		lbl.Font = Enum.Font.Gotham
-		lbl.TextSize = 10
-		lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-		lbl.TextXAlignment = Enum.TextXAlignment.Right
-		lbl.Parent = row
-		local box = Instance.new("TextBox")
-		box.Size = UDim2.new(0, 80, 0, 20)
-		box.Position = UDim2.new(1, -80, 0.5, -10)
-		box.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-		box.BorderSizePixel = 0
-		box.Text = default or ""
-		box.Font = Enum.Font.Gotham
-		box.TextSize = 10
-		box.TextColor3 = Color3.fromRGB(230, 230, 230)
-		box.ClearTextOnFocus = false
-		box.Parent = row
-		local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 2) bc.Parent = box
-		fields[name] = box
-		yPos += 24
-	end
-
-	addField("Delay (s)", "0.248")
-	addField("Hitbox X", "9")
-	addField("Hitbox Y", "10")
-	addField("Hitbox Z", "10")
-	addField("HSO", "3")
-	addField("Max Dist", "85")
-	addField("Repeat", "1")
-	addField("Rep Delay", "0.35")
-
-	local dodgeRow = Instance.new("Frame")
-	dodgeRow.Size = UDim2.new(1, -12, 0, 22)
-	dodgeRow.Position = UDim2.new(0, 6, 0, yPos)
-	dodgeRow.BackgroundTransparency = 1
-	dodgeRow.Parent = qp
-	local dLbl = Instance.new("TextLabel")
-	dLbl.Size = UDim2.new(0, 86, 1, 0)
-	dLbl.BackgroundTransparency = 1
-	dLbl.Text = "Dodge Dir:"
-	dLbl.Font = Enum.Font.Gotham
-	dLbl.TextSize = 10
-	dLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-	dLbl.TextXAlignment = Enum.TextXAlignment.Right
-	dLbl.Parent = dodgeRow
-	local dBox = Instance.new("TextButton")
-	dBox.Size = UDim2.new(0, 80, 0, 20)
-	dBox.Position = UDim2.new(1, -80, 0.5, -10)
-	dBox.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	dBox.BorderSizePixel = 0
-	dBox.Text = "None"
-	dBox.Font = Enum.Font.Gotham
-	dBox.TextSize = 10
-	dBox.TextColor3 = Color3.fromRGB(230, 230, 230)
-	dBox.Parent = dodgeRow
-	local dbc = Instance.new("UICorner") dbc.CornerRadius = UDim.new(0, 2) dbc.Parent = dBox
-	local dopts = {"None", "Forward", "Backward", "Left", "Right", "Up", "Down"}
-	local didx = 1
-	dBox.MouseButton1Click:Connect(function()
-		didx = didx + 1
-		if didx > #dopts then didx = 1 end
-		dBox.Text = dopts[didx]
+	local loggerLayout = Instance.new("UIListLayout")
+	loggerLayout.Padding = UDim.new(0, 3)
+	loggerLayout.Parent = loggerScroll
+	loggerLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		loggerScroll.CanvasSize = UDim2.new(0, 0, 0, loggerLayout.AbsoluteContentSize.Y + 4)
 	end)
-	fields["Dodge Dir"] = dBox
 
-	local saveBtn = Instance.new("TextButton")
-	saveBtn.Size = UDim2.new(1, -12, 0, 26)
-	saveBtn.Position = UDim2.new(0, 6, 1, -32)
-	saveBtn.BackgroundColor3 = Color3.fromRGB(230, 230, 230)
-	saveBtn.Text = "Save & Apply"
-	saveBtn.Font = Enum.Font.GothamBold
-	saveBtn.TextSize = 11
-	saveBtn.TextColor3 = Color3.fromRGB(20, 20, 20)
-	saveBtn.BorderSizePixel = 0
-	saveBtn.Parent = qp
-	local svc = Instance.new("UICorner") svc.CornerRadius = UDim.new(0, 3) svc.Parent = saveBtn
-
-	local function buildRig()
-		if not previewWorldVis or not previewWorldVis.Parent then return end
-		for _, c in ipairs(previewWorldVis:GetChildren()) do
-			if c.Name ~= "PreviewFloor" then c:Destroy() end
+	clearBtn.MouseButton1Click:Connect(function()
+		for _, r in ipairs(loggerRows) do
+			if r and r.Parent then r:Destroy() end
 		end
-		previewRig, previewHum = nil, nil
-		local char = LP.Character
-		if not char then return end
-		local ok2, clone = pcall(function() return char:Clone() end)
-		if not ok2 or not clone then return end
-		clone.Name = "PreviewRig"
-		for _, d in ipairs(clone:GetDescendants()) do
-			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("Sound") or d:IsA("ParticleEmitter") then
-				d:Destroy()
+		loggerRows = {}
+		if loggerTitle then loggerTitle.Text = "Info Logger     0 Entries" end
+	end)
+
+	getgenv().OutlawLogger = loggerWin
+end
+
+local function addLogRow(id, name, source, dist)
+	if not loggerScroll or not loggerScroll.Parent then return end
+	local row = Instance.new("TextButton")
+	row.Size = UDim2.new(1, -4, 0, 22)
+	row.BackgroundColor3 = Color3.fromRGB(40, 35, 20)
+	row.Text = ""
+	row.AutoButtonColor = false
+	row.BorderSizePixel = 0
+	row.Parent = loggerScroll
+	local rc = Instance.new("UICorner") rc.CornerRadius = UDim.new(0, 3) rc.Parent = row
+
+	local function cell(txt, xo, w, color)
+		local l = Instance.new("TextLabel")
+		l.Size = UDim2.new(0, w, 1, 0)
+		l.Position = UDim2.new(0, xo, 0, 0)
+		l.BackgroundTransparency = 1
+		l.Text = txt
+		l.Font = Enum.Font.Gotham
+		l.TextSize = 10
+		l.TextColor3 = color or Color3.fromRGB(220, 220, 220)
+		l.TextXAlignment = Enum.TextXAlignment.Left
+		l.TextTruncate = Enum.TextTruncate.AtEnd
+		l.Parent = row
+		return l
+	end
+
+	cell(name ~= "" and name or "Anim", 8, 140)
+	cell(id, 155, 150, Color3.fromRGB(180, 180, 180))
+	cell(source, 305, 70)
+	cell(tostring(dist or 0), 375, 50)
+
+	table.insert(loggerRows, row)
+	if loggerTitle then
+		loggerTitle.Text = "Info Logger     " .. #loggerRows .. " Entries"
+	end
+end
+
+-- =============================================================
+-- MY LOGGER (local player only)
+-- =============================================================
+local function buildMyLogger()
+	if getgenv().OutlawMyLogger and getgenv().OutlawMyLogger.Parent then return end
+
+	local existingGui = nil
+	for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
+		if g then
+			local e = g:FindFirstChild("OutlawMyLogger")
+			if e then existingGui = e break end
+		end
+	end
+	if existingGui then pcall(function() existingGui:Destroy() end) end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "OutlawMyLogger"
+	gui.ResetOnSpawn = false
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	pcall(function() gui.Parent = gethui() end)
+	if not gui.Parent then pcall(function() gui.Parent = game:GetService("CoreGui") end) end
+	if not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
+
+	local screenW = workspace.CurrentCamera.ViewportSize.X
+	local screenH = workspace.CurrentCamera.ViewportSize.Y
+	local winW, winH = 400, 340
+	local cx = math.floor((screenW - winW) / 2 + 220)
+	if cx + winW > screenW - 12 then cx = screenW - winW - 12 end
+	local cy = math.floor((screenH - winH) / 2)
+
+	myLoggerWin = Instance.new("Frame")
+	myLoggerWin.Name = "MyLogger"
+	myLoggerWin.Size = UDim2.new(0, winW, 0, winH)
+	myLoggerWin.Position = UDim2.new(0, cx, 0, cy)
+	myLoggerWin.BackgroundColor3 = Color3.fromRGB(14, 18, 22)
+	myLoggerWin.BorderSizePixel = 0
+	myLoggerWin.Active = true
+	myLoggerWin.Draggable = true
+	myLoggerWin.Visible = true
+	myLoggerWin.Parent = gui
+	local mlc = Instance.new("UICorner") mlc.CornerRadius = UDim.new(0, 4) mlc.Parent = myLoggerWin
+	local mls = Instance.new("UIStroke") mls.Color = Color3.fromRGB(60, 110, 150) mls.Thickness = 1 mls.Parent = myLoggerWin
+
+	myLoggerTitle = Instance.new("TextLabel")
+	myLoggerTitle.Size = UDim2.new(1, -100, 0, 22)
+	myLoggerTitle.Position = UDim2.new(0, 10, 0, 4)
+	myLoggerTitle.BackgroundTransparency = 1
+	myLoggerTitle.Text = "My Logger (you)     0 Entries"
+	myLoggerTitle.Font = Enum.Font.GothamBold
+	myLoggerTitle.TextSize = 12
+	myLoggerTitle.TextColor3 = Color3.fromRGB(160, 210, 240)
+	myLoggerTitle.TextXAlignment = Enum.TextXAlignment.Left
+	myLoggerTitle.Parent = myLoggerWin
+
+	local clearBtn = Instance.new("TextButton")
+	clearBtn.Size = UDim2.new(0, 50, 0, 18)
+	clearBtn.Position = UDim2.new(1, -78, 0, 6)
+	clearBtn.BackgroundColor3 = Color3.fromRGB(40, 60, 80)
+	clearBtn.Text = "Clear"
+	clearBtn.Font = Enum.Font.Gotham
+	clearBtn.TextSize = 11
+	clearBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+	clearBtn.BorderSizePixel = 0
+	clearBtn.Parent = myLoggerWin
+	local mlcc = Instance.new("UICorner") mlcc.CornerRadius = UDim.new(0, 3) mlcc.Parent = clearBtn
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0, 18, 0, 18)
+	closeBtn.Position = UDim2.new(1, -24, 0, 6)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(40, 50, 70)
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 11
+	closeBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+	closeBtn.BorderSizePixel = 0
+	closeBtn.Parent = myLoggerWin
+	local mlxc = Instance.new("UICorner") mlxc.CornerRadius = UDim.new(0, 3) mlxc.Parent = closeBtn
+	closeBtn.MouseButton1Click:Connect(function() myLoggerWin.Visible = false end)
+
+	local headerRow = Instance.new("Frame")
+	headerRow.Size = UDim2.new(1, -16, 0, 18)
+	headerRow.Position = UDim2.new(0, 8, 0, 28)
+	headerRow.BackgroundTransparency = 1
+	headerRow.Parent = myLoggerWin
+
+	local function headLabel(text, xo, w)
+		local l = Instance.new("TextLabel")
+		l.Size = UDim2.new(0, w, 1, 0)
+		l.Position = UDim2.new(0, xo, 0, 0)
+		l.BackgroundTransparency = 1
+		l.Text = text
+		l.Font = Enum.Font.GothamBold
+		l.TextSize = 10
+		l.TextColor3 = Color3.fromRGB(150, 200, 230)
+		l.TextXAlignment = Enum.TextXAlignment.Left
+		l.Parent = headerRow
+		return l
+	end
+
+	headLabel("Animation", 8, 160)
+	headLabel("ID", 170, 220)
+
+	myLoggerScroll = Instance.new("ScrollingFrame")
+	myLoggerScroll.Size = UDim2.new(1, -16, 1, -54)
+	myLoggerScroll.Position = UDim2.new(0, 8, 0, 48)
+	myLoggerScroll.BackgroundTransparency = 1
+	myLoggerScroll.BorderSizePixel = 0
+	myLoggerScroll.ScrollBarThickness = 4
+	myLoggerScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	myLoggerScroll.Parent = myLoggerWin
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 3)
+	layout.Parent = myLoggerScroll
+	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		myLoggerScroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 4)
+	end)
+
+	clearBtn.MouseButton1Click:Connect(function()
+		for _, r in ipairs(myLoggerRows) do
+			if r and r.Parent then r:Destroy() end
+		end
+		myLoggerRows = {}
+		if myLoggerTitle then myLoggerTitle.Text = "My Logger (you)     0 Entries" end
+	end)
+
+	getgenv().OutlawMyLogger = myLoggerWin
+	getgenv().OutlawMyLoggerClear = function()
+		for _, r in ipairs(myLoggerRows) do
+			if r and r.Parent then r:Destroy() end
+		end
+		myLoggerRows = {}
+		if myLoggerTitle then myLoggerTitle.Text = "My Logger (you)     0 Entries" end
+	end
+end
+
+local function addMyLogRow(id, name)
+	if not myLoggerScroll or not myLoggerScroll.Parent then return end
+	local row = Instance.new("TextButton")
+	row.Size = UDim2.new(1, -4, 0, 20)
+	row.BackgroundColor3 = Color3.fromRGB(22, 34, 44)
+	row.Text = ""
+	row.AutoButtonColor = false
+	row.BorderSizePixel = 0
+	row.Parent = myLoggerScroll
+	local rc = Instance.new("UICorner") rc.CornerRadius = UDim.new(0, 3) rc.Parent = row
+
+	local function cell(txt, xo, w, color)
+		local l = Instance.new("TextLabel")
+		l.Size = UDim2.new(0, w, 1, 0)
+		l.Position = UDim2.new(0, xo, 0, 0)
+		l.BackgroundTransparency = 1
+		l.Text = txt
+		l.Font = Enum.Font.Gotham
+		l.TextSize = 10
+		l.TextColor3 = color or Color3.fromRGB(215, 225, 235)
+		l.TextXAlignment = Enum.TextXAlignment.Left
+		l.TextTruncate = Enum.TextTruncate.AtEnd
+		l.Parent = row
+		return l
+	end
+
+	cell(name ~= "" and name or "Anim", 8, 160)
+	cell(id, 170, 220, Color3.fromRGB(180, 200, 215))
+
+	table.insert(myLoggerRows, row)
+	if myLoggerTitle then
+		myLoggerTitle.Text = "My Logger (you)     " .. #myLoggerRows .. " Entries"
+	end
+end
+
+-- =============================================================
+-- HOOK LOGGER
+-- =============================================================
+local function hookLog(hum)
+	if not hum or not hum:IsA("Humanoid") then return end
+	if logHooked[hum] then return end
+	logHooked[hum] = true
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		task.spawn(function()
+			local t = 0
+			while hum.Parent and not animator and t < 5 do
+				task.wait(0.1); t = t + 0.1
+				animator = hum:FindFirstChildOfClass("Animator")
 			end
-		end
-		clone.Parent = previewWorldVis
-		local hrp = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
-		if hrp then
-			hrp.Anchored = false
-			clone:PivotTo(CFrame.new(0, 3, 0))
-			hrp.Anchored = true
-		end
-		if not hrp then
-			local torso = clone:FindFirstChild("Torso")
-			if torso then
-				clone:PivotTo(CFrame.new(0, 3, 0))
-				for _, p in ipairs(clone:GetDescendants()) do
-					if p:IsA("BasePart") then p.Anchored = true end
+			if animator then hookLog(hum) end
+		end)
+		return
+	end
+	local model = hum.Parent
+	animator.AnimationPlayed:Connect(function(track)
+		local anim = track.Animation
+		if not anim then return end
+		local id = anim.AnimationId
+		if not id or id == "" then return end
+
+		if model ~= LP.Character then
+			local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+			local theirRoot = model:FindFirstChild("HumanoidRootPart")
+			if myRoot and theirRoot then
+				local d = (myRoot.Position - theirRoot.Position).Magnitude
+				if d <= logRange and not skipNames[anim.Name] then
+					task.spawn(function()
+						addLogRow(id, anim.Name, model.Name, math.floor(d))
+					end)
 				end
 			end
 		end
-		local hum = clone:FindFirstChildOfClass("Humanoid")
-		if hum then
-			hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-			local old = hum:FindFirstChildOfClass("Animator")
-			if old then old:Destroy() end
-			local a = Instance.new("Animator")
-			a.Parent = hum
-			previewHum = hum
-		end
-		previewRig = clone
-	end
-
-	buildRig()
-
-	local pausedTime = 0
-
-	local function stopPlayback()
-		if currentTrack then
-			pcall(function() currentTrack:Stop() end)
-			currentTrack = nil
-		end
-		paused = false
-		scrubFill.Size = UDim2.new(0, 0, 1, 0)
-		timeLbl.Text = "0.000s / 0.000s"
-		btnPause.Text = "Pause"
-	end
-
-	local function playAnim(id)
-		if not previewHum or not previewHum.Parent then buildRig() end
-		if not previewHum then return end
-		stopPlayback()
-		local anim = Instance.new("Animation")
-		anim.AnimationId = id
-		local okA, track = pcall(function() return previewHum:LoadAnimation(anim) end)
-		if not okA or not track then return end
-		track.Looped = loopPlayback
-		track:Play()
-		pcall(function() track:AdjustSpeed(playbackSpeed) end)
-		currentTrack = track
-		currentDuration = track.Length or 0
-		paused = false
-		btnPause.Text = "Pause"
-	end
-
-	local function togglePause()
-		if not currentTrack then return end
-		paused = not paused
-		if paused then
-			pausedTime = currentTrack.TimePosition
-			pcall(function() currentTrack:AdjustSpeed(0) end)
-			pcall(function() currentTrack:Pause() end)
-			btnPause.Text = "Resume"
-		else
-			pcall(function() currentTrack:Play() end)
-			pcall(function() currentTrack.TimePosition = pausedTime end)
-			pcall(function() currentTrack:AdjustSpeed(playbackSpeed) end)
-			btnPause.Text = "Pause"
-		end
-	end
-
-	RunService.RenderStepped:Connect(function()
-		if not currentTrack then return end
-		if paused then
-			pcall(function() currentTrack.TimePosition = pausedTime end)
-		end
-		local t = currentTrack.TimePosition or 0
-		local dur = currentTrack.Length or currentDuration or 0
-		currentDuration = dur
-		local frac = dur > 0 and (t / dur) or 0
-		if frac > 1 then frac = 1 end
-		scrubFill.Size = UDim2.new(frac, 0, 1, 0)
-		timeLbl.Text = string.format("%.3fs / %.3fs", t, dur)
 	end)
-
-	local scrubDragging = false
-	scrubBg.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			scrubDragging = true
-		end
-	end)
-	scrubBg.InputChanged:Connect(function(input)
-		if scrubDragging and currentTrack and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local left = scrubBg.AbsolutePosition.X
-			local width = scrubBg.AbsoluteSize.X
-			if width > 0 then
-				local f = math.clamp((input.Position.X - left) / width, 0, 1)
-				pausedTime = f * (currentTrack.Length or 0)
-				pcall(function() currentTrack.TimePosition = pausedTime end)
-			end
-		end
-	end)
-	scrubBg.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			scrubDragging = false
-		end
-	end)
-
-	btnPlay.MouseButton1Click:Connect(function()
-		if currentId then playAnim(currentId) end
-	end)
-	btnPause.MouseButton1Click:Connect(togglePause)
-	btnStop.MouseButton1Click:Connect(stopPlayback)
-
-	local speeds = {0.1, 0.25, 0.5, 1, 1.5, 2}
-	local sIdx = 4
-	btnSpeed.MouseButton1Click:Connect(function()
-		sIdx = sIdx + 1
-		if sIdx > #speeds then sIdx = 1 end
-		playbackSpeed = speeds[sIdx]
-		btnSpeed.Text = "Speed " .. tostring(playbackSpeed) .. "x"
-		if currentTrack and not paused then
-			pcall(function() currentTrack:AdjustSpeed(playbackSpeed) end)
-		end
-	end)
-
-	btnLoop.MouseButton1Click:Connect(function()
-		loopPlayback = not loopPlayback
-		btnLoop.Text = loopPlayback and "Loop ON" or "Loop OFF"
-		if currentTrack then
-			pcall(function() currentTrack.Looped = loopPlayback end)
-		end
-	end)
-
-	UserInputService.InputBegan:Connect(function(input, gp)
-		if gp then return end
-		if input.KeyCode == Enum.KeyCode.Space then
-			togglePause()
-		end
-	end)
-
-	saveBtn.MouseButton1Click:Connect(function()
-		if not currentId then return end
-		atkIds[currentId] = true
-		Airflow:Notify("outlaw.dev", "Saved: " .. currentId, 3)
-		print("[Visualizer] Saved:", currentId)
-	end)
-
-	getgenv().OutlawSelectAnim = function(id)
-		currentId = id
-		idBar.Text = id
-		combined.Visible = true
-		playAnim(id)
-	end
-
-	LP.CharacterAdded:Connect(function()
-		task.wait(1)
-		buildRig()
-		if currentTrack and not paused then
-			pcall(function() currentTrack:Stop() end)
-			currentTrack = nil
-		end
-	end)
-
-	getgenv().OutlawVisualizer = combined
 end
 
-task.spawn(function()
-	task.wait(1)
-	buildVisualizer()
-end)
+local function hookMyLogger(hum)
+	if not hum or not hum:IsA("Humanoid") then return end
+	if myLogHooked[hum] then return end
+	myLogHooked[hum] = true
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		task.spawn(function()
+			local t = 0
+			while hum.Parent and not animator and t < 5 do
+				task.wait(0.1); t = t + 0.1
+				animator = hum:FindFirstChildOfClass("Animator")
+			end
+			if animator then hookMyLogger(hum) end
+		end)
+		return
+	end
+	animator.AnimationPlayed:Connect(function(track)
+		local anim = track.Animation
+		if not anim then return end
+		local id = anim.AnimationId
+		if not id or id == "" then return end
+		if getgenv().OutlawIncludeLoco then
+			task.spawn(function() addMyLogRow(id, anim.Name) end)
+		elseif getgenv().OutlawFilterLoco ~= false then
+			if not isLocomotion(id, anim.Name) then
+				task.spawn(function() addMyLogRow(id, anim.Name) end)
+			end
+		else
+			task.spawn(function() addMyLogRow(id, anim.Name) end)
+		end
+	end)
+end
 
--- ===== UI =====
+local function bindMyLoggerChar(char)
+	if not char then return end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum then hookMyLogger(hum) end
+	char.ChildAdded:Connect(function(c)
+		if c:IsA("Humanoid") then hookMyLogger(c) end
+	end)
+	char.DescendantAdded:Connect(function(c)
+		if c:IsA("Humanoid") then hookMyLogger(c) end
+	end)
+end
+
+local function hookContainer(container)
+	if not container then return end
+	for _, c in ipairs(container:GetChildren()) do
+		if c:IsA("Model") then
+			local h = c:FindFirstChildOfClass("Humanoid")
+			if h then hookLog(h) end
+		end
+	end
+end
+
+-- =============================================================
+-- UI
+-- =============================================================
 local Window = Airflow:CreateWindow({
 	Name = "outlaw.dev",
 	LoadingSubtitle = "syncrypt",
@@ -1547,8 +1267,8 @@ local TradeTab = Window:CreateTab("M1 Trade", "sword")
 local HeadRideTab = Window:CreateTab("Auto Head Ride", "crown")
 local NanamiTab = Window:CreateTab("Auto Nanami", "target")
 local YujiTab = Window:CreateTab("Auto Yuji", "flame")
-local RecorderTab = Window:CreateTab("Auto Block Recorder", "radio")
-local VisTab = Window:CreateTab("Visualizer", "eye")
+local InfoLoggerTab = Window:CreateTab("Info Logger", "scroll")
+local MyLoggerTab = Window:CreateTab("My Logger", "list")
 local PlayerTab = Window:CreateTab("Player", "person-standing")
 local MiscTab = Window:CreateTab("Misc", "settings")
 local SettingsTab = Window:CreateTab("Settings", "settings")
@@ -1564,9 +1284,7 @@ FarmTab:CreateToggle({
 		farmOn = v
 		if v then
 			startHooks()
-			if not lockConn then
-				lockConn = RunService.RenderStepped:Connect(lockTick)
-			end
+			if not lockConn then lockConn = RunService.RenderStepped:Connect(lockTick) end
 			farmLoop()
 		else
 			if farmConn then farmConn:Disconnect() farmConn = nil end
@@ -1580,7 +1298,6 @@ FarmTab:CreateToggle({
 })
 FarmTab:CreateDropdown({
 	Name = "Position Mode",
-	Description = "Where to stand relative to the enemy",
 	Options = {"On Top", "Below", "Behind", "In Front"},
 	CurrentOption = "On Top",
 	Flag = "FR_Pos",
@@ -1588,29 +1305,23 @@ FarmTab:CreateDropdown({
 })
 FarmTab:CreateDropdown({
 	Name = "Skill Rotation",
-	Description = "Which skills to cycle through. Default 1->2->3->4",
 	Options = {"1,2,3,4", "1", "2", "3", "4"},
 	CurrentOption = "1,2,3,4",
 	Flag = "FR_Rotation",
 	Callback = function(v)
-		if v == "1,2,3,4" then
-			farmSkillRotation = {"1", "2", "3", "4"}
-		else
-			farmSkillRotation = {v}
-		end
+		if v == "1,2,3,4" then farmSkillRotation = {"1", "2", "3", "4"}
+		else farmSkillRotation = {v} end
 		farmRotationIndex = 1
 	end,
 })
 FarmTab:CreateToggle({
 	Name = "Team Check",
-	Description = "Skips teammates. Off = farms everyone (FFA)",
 	CurrentValue = true,
 	Flag = "FR_TeamCheck",
 	Callback = function(v) farmTeamCheck = v end,
 })
 FarmTab:CreateSlider({
 	Name = "Farm Range",
-	Description = "How far an enemy can be to farm",
 	Range = {5, 200},
 	Increment = 1,
 	CurrentValue = 30,
@@ -1800,7 +1511,7 @@ TradeTab:CreateButton({
 	end,
 })
 TradeTab:CreateButton({
-	Name = "Test Full Sequence (BlockOn -> BlockOff -> M1)",
+	Name = "Test Full Sequence",
 	Callback = function()
 		local i = getInput()
 		if not i then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
@@ -1828,7 +1539,7 @@ TradeTab:CreateButton({
 HeadRideTab:CreateSection("Head Ride")
 HeadRideTab:CreateToggle({
 	Name = "Auto Head Ride",
-	Description = "When your finisher actually HITS an enemy, glides above them and drops off after a moment",
+	Description = "When your finisher actually HITS an enemy, glides above them and drops off",
 	CurrentValue = false,
 	Flag = "HR_On",
 	Callback = function(v)
@@ -1876,10 +1587,7 @@ HeadRideTab:CreateButton({
 	Name = "Test Head Ride Nearest",
 	Callback = function()
 		local hum = next(hooked)
-		if not hum then
-			Airflow:Notify("outlaw.dev", "No tracked enemies", 3)
-			return
-		end
+		if not hum then return Airflow:Notify("outlaw.dev", "No tracked enemies", 3) end
 		headRideOn = true
 		startHeadRide(hum)
 		Airflow:Notify("outlaw.dev", "Head ride on", 2)
@@ -2036,165 +1744,96 @@ YujiTab:CreateButton({
 	end,
 })
 
--- ===== RECORDER =====
-RecorderTab:CreateSection("Recorder")
-RecorderTab:CreateToggle({
-	Name = "Start Recording",
-	CurrentValue = false,
-	Flag = "REC_On",
-	Callback = function(v)
-		if v then
-			recorderStart()
-			Airflow:Notify("outlaw.dev", "Recorder on", 2)
-		else
-			recorderStop()
-			Airflow:Notify("outlaw.dev", "Recorder off", 2)
-		end
-	end,
-})
-RecorderTab:CreateToggle({
-	Name = "Skip Movement Anims",
+-- ===== INFO LOGGER TAB =====
+InfoLoggerTab:CreateSection("Info Logger")
+InfoLoggerTab:CreateToggle({
+	Name = "Show Info Logger Window",
+	Description = "Logs enemy animations in range",
 	CurrentValue = true,
-	Flag = "REC_SkipMove",
-	Callback = function(v) recorderSkipMove = v end,
-})
-RecorderTab:CreateInput({
-	Name = "Add Custom Skip ID",
-	CurrentValue = "",
-	PlaceholderText = "rbxassetid://...",
-	Flag = "REC_AddSkip",
+	Flag = "IL_Show",
 	Callback = function(v)
-		if v and v ~= "" then
-			recorderSkipIds[v] = true
-			Airflow:Notify("outlaw.dev", "Added to skip list", 2)
+		if getgenv().OutlawLogger then getgenv().OutlawLogger.Visible = v end
+	end,
+})
+InfoLoggerTab:CreateSection("Log Range")
+local ilRangeLbl = InfoLoggerTab:CreateLabel("Range: " .. logRange)
+InfoLoggerTab:CreateButton({
+	Name = "Range -20",
+	Callback = function()
+		logRange = math.max(20, logRange - 20)
+		ilRangeLbl:Set("Range: " .. logRange)
+	end,
+})
+InfoLoggerTab:CreateButton({
+	Name = "Range +20",
+	Callback = function()
+		logRange = math.min(500, logRange + 20)
+		ilRangeLbl:Set("Range: " .. logRange)
+	end,
+})
+InfoLoggerTab:CreateSection("Actions")
+InfoLoggerTab:CreateButton({
+	Name = "Clear Info Logger",
+	Callback = function()
+		for _, r in ipairs(loggerRows) do
+			if r and r.Parent then r:Destroy() end
 		end
-	end,
-})
-RecorderTab:CreateSection("Preview Window")
-RecorderTab:CreateButton({
-	Name = "Show Preview Window",
-	Callback = function()
-		if previewFrame then previewFrame.Visible = true end
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Hide Preview Window",
-	Callback = function()
-		if previewFrame then previewFrame.Visible = false end
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Refresh Preview Rig",
-	Callback = function()
-		if previewFrame then
-			pcall(function() previewFrame.Parent:Destroy() end)
-		end
-		setupPreviewRig()
-		Airflow:Notify("outlaw.dev", "Preview rig refreshed", 2)
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Preview Last Animation",
-	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		local last = recorderLog[#recorderLog]
-		previewAnim(last.id, last.model)
-		Airflow:Notify("outlaw.dev", "Previewing: " .. last.id, 2)
-	end,
-})
-RecorderTab:CreateSection("Copy")
-RecorderTab:CreateButton({
-	Name = "Copy Last Attack ID",
-	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		local last = recorderLog[#recorderLog]
-		copyText(last.id, "Copied: " .. last.id)
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Copy Just Unique IDs (atkIds format)",
-	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		copyText(recorderIdsOnly(), "Unique IDs copied")
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Copy Full Log (model -> id)",
-	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		copyText(recorderToText(), "Log copied")
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Clear Log",
-	Callback = function()
-		table.clear(recorderLog)
-		Airflow:Notify("outlaw.dev", "Log cleared", 2)
-	end,
-})
-RecorderTab:CreateSection("Attack List")
-RecorderTab:CreateButton({
-	Name = "Add Last ID to Attack List",
-	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		local last = recorderLog[#recorderLog]
-		atkIds[last.id] = true
-		Airflow:Notify("outlaw.dev", "Added: " .. last.id, 3)
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Print Current Attack List",
-	Callback = function()
-		print("[AutoBlock] Watching IDs:")
-		for id in pairs(atkIds) do
-			print("  " .. id)
-		end
-		print("[HeadRide] My finisher ID:", headRideAnimId)
-		Airflow:Notify("outlaw.dev", "Printed to F9", 2)
-	end,
-})
-RecorderTab:CreateButton({
-	Name = "Send Last ID to Visualizer",
-	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		local last = recorderLog[#recorderLog]
-		if getgenv().OutlawSelectAnim then getgenv().OutlawSelectAnim(last.id) end
+		loggerRows = {}
+		if loggerTitle then loggerTitle.Text = "Info Logger     0 Entries" end
 	end,
 })
 
--- ===== VISUALIZER TAB =====
-VisTab:CreateSection("Visualizer")
-VisTab:CreateButton({
-	Name = "Open Visualizer Window",
-	Callback = function()
-		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = true end
+-- ===== MY LOGGER TAB =====
+MyLoggerTab:CreateSection("My Logger")
+MyLoggerTab:CreateToggle({
+	Name = "Show My Logger Window",
+	Description = "Logs only your own animations",
+	CurrentValue = true,
+	Flag = "ML_Show",
+	Callback = function(v)
+		if getgenv().OutlawMyLogger then getgenv().OutlawMyLogger.Visible = v end
 	end,
 })
-VisTab:CreateButton({
-	Name = "Close Visualizer Window",
+MyLoggerTab:CreateToggle({
+	Name = "Filter Locomotion",
+	Description = "Skip walk/run/jump/idle/swim/climb anims",
+	CurrentValue = true,
+	Flag = "ML_FilterLoco",
+	Callback = function(v) getgenv().OutlawFilterLoco = v end,
+})
+MyLoggerTab:CreateToggle({
+	Name = "Include Locomotion",
+	Description = "Log locomotion too (overrides filter)",
+	CurrentValue = false,
+	Flag = "ML_IncludeLoco",
+	Callback = function(v) getgenv().OutlawIncludeLoco = v end,
+})
+MyLoggerTab:CreateSection("Log Range")
+local mlRangeLbl = MyLoggerTab:CreateLabel("Range: " .. myLogRange)
+MyLoggerTab:CreateButton({
+	Name = "Range -20",
 	Callback = function()
-		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = false end
+		myLogRange = math.max(20, myLogRange - 20)
+		mlRangeLbl:Set("Range: " .. myLogRange)
 	end,
 })
-VisTab:CreateButton({
-	Name = "Refresh Preview Rig",
+MyLoggerTab:CreateButton({
+	Name = "Range +20",
 	Callback = function()
-		if getgenv().OutlawVisualizer then
-			-- force rebuild via CharacterAdded path
-		end
+		myLogRange = math.min(500, myLogRange + 20)
+		mlRangeLbl:Set("Range: " .. myLogRange)
 	end,
 })
-VisTab:CreateSection("Quick Preview")
-VisTab:CreateButton({
-	Name = "Send Last Recorded to Visualizer",
+MyLoggerTab:CreateSection("Actions")
+MyLoggerTab:CreateButton({
+	Name = "Clear My Logger",
 	Callback = function()
-		if #recorderLog == 0 then return Airflow:Notify("outlaw.dev", "Nothing recorded", 2) end
-		local last = recorderLog[#recorderLog]
-		if getgenv().OutlawSelectAnim then getgenv().OutlawSelectAnim(last.id) end
+		if getgenv().OutlawMyLoggerClear then getgenv().OutlawMyLoggerClear() end
 	end,
 })
-VisTab:CreateLabel("Use the Recorder tab to capture animations first.")
-VisTab:CreateLabel("Click any recorded ID to preview it here.")
+
+getgenv().OutlawFilterLoco = true
+getgenv().OutlawIncludeLoco = false
 
 -- ===== PLAYER =====
 PlayerTab:CreateSection("Movement")
@@ -2349,9 +1988,50 @@ SettingsTab:CreateButton({
 	Name = "Unload",
 	Callback = function()
 		pcall(function() Airflow:Destroy() end)
-		if previewFrame then pcall(function() previewFrame.Parent:Destroy() end) end
-		if getgenv().OutlawVisualizer then pcall(function() getgenv().OutlawVisualizer.Parent:Destroy() end) end
+		if getgenv().OutlawLogger and getgenv().OutlawLogger.Parent then
+			pcall(function() getgenv().OutlawLogger.Parent:Destroy() end)
+		end
+		if getgenv().OutlawMyLogger and getgenv().OutlawMyLogger.Parent then
+			pcall(function() getgenv().OutlawMyLogger.Parent:Destroy() end)
+		end
 	end,
 })
 
-Airflow:Notify("outlaw.dev", "Loaded. Press RightControl to toggle menu.", 5)
+-- ===== STARTUP =====
+task.spawn(function()
+	task.wait(1.2)
+	buildLogger()
+	buildMyLogger()
+	hookContainer(workspace:FindFirstChild("Live"))
+	hookContainer(workspace:FindFirstChild("Players"))
+	local live = workspace:FindFirstChild("Live")
+	if live then
+		live.ChildAdded:Connect(function(c)
+			if c:IsA("Model") then
+				local h = c:FindFirstChildOfClass("Humanoid")
+				if h then hookLog(h) end
+			end
+		end)
+	end
+	local p = workspace:FindFirstChild("Players")
+	if p then
+		p.ChildAdded:Connect(function(c)
+			if c:IsA("Model") then
+				local h = c:FindFirstChildOfClass("Humanoid")
+				if h then hookLog(h) end
+			end
+		end)
+	end
+	workspace.DescendantAdded:Connect(function(o)
+		if o:IsA("Humanoid") then hookLog(o) end
+	end)
+	bindMyLoggerChar(LP.Character)
+	LP.CharacterAdded:Connect(function(char)
+		task.wait(0.5)
+		bindMyLoggerChar(char)
+	end)
+end)
+
+startCombatHooks()
+
+Airflow:Notify("outlaw.dev", "Loaded. Farm + Block + Trade + Head Ride + Nanami + Yuji + Loggers.", 5)
