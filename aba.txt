@@ -1,0 +1,1237 @@
+--!strict
+-- outlaw.dev — Auto Block + M1 Trade + Animation Editor + Visualizer + Info Logger + Self Logger
+-- v3: dodge/jump removed; self-logger rehooks correctly across respawns;
+--     visualizer camera auto-frames rig (legs visible, large characters supported).
+
+local AirflowSrc = "https://raw.githubusercontent.com/PookiePepelsss/Airflow-UI/refs/heads/main/Source.luau"
+
+local Airflow, loadErr
+local ok, res = pcall(function() return loadstring(game:HttpGet(AirflowSrc))() end)
+if ok and type(res) == "table" and res.CreateWindow then Airflow = res end
+if not Airflow then
+	game:GetService("StarterGui"):SetCore("SendNotification", {
+		Title = "outlaw.dev", Text = "Airflow failed: " .. tostring(res), Duration = 10
+	})
+	return
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+
+getgenv().OutlawAtkIds = getgenv().OutlawAtkIds or {
+	["rbxassetid://1461128166"] = true,
+	["rbxassetid://1461128859"] = true,
+	["rbxassetid://1461136273"] = true,
+	["rbxassetid://1461136875"] = true,
+}
+getgenv().OutlawTiming = getgenv().OutlawTiming or {}
+getgenv().OutlawResponses = getgenv().OutlawResponses or {}
+local atkIds = getgenv().OutlawAtkIds
+local timing = getgenv().OutlawTiming
+local responses = getgenv().OutlawResponses
+
+getgenv().OutlawSelfWhitelist = getgenv().OutlawSelfWhitelist or {
+	["rbxassetid://1461128166"] = "M1_1",
+	["rbxassetid://1461128859"] = "M1_2",
+	["rbxassetid://1461136273"] = "M1_3",
+	["rbxassetid://1461136875"] = "M1_4",
+}
+local selfWhitelist = getgenv().OutlawSelfWhitelist
+getgenv().OutlawSelfWhitelistOnly = true
+
+local selfBlacklist = {
+	["rbxassetid://507766666"]=true,["rbxassetid://507766951"]=true,
+	["rbxassetid://507766388"]=true,["rbxassetid://507777826"]=true,
+	["rbxassetid://507767714"]=true,["rbxassetid://507784897"]=true,
+	["rbxassetid://507785072"]=true,["rbxassetid://507797819"]=true,
+	["rbxassetid://507798160"]=true,["rbxassetid://180435571"]=true,
+	["rbxassetid://180435792"]=true,["rbxassetid://125750702"]=true,
+	["rbxassetid://656118852"]=true,["rbxassetid://656117400"]=true,
+	["rbxassetid://656121766"]=true,["rbxassetid://656118341"]=true,
+	["rbxassetid://913376220"]=true,["rbxassetid://913377155"]=true,
+	["rbxassetid://913380116"]=true,["rbxassetid://507768375"]=true,
+}
+local movementNames = {
+	WalkAnim=true,JumpAnim=true,RunAnim=true,SwimAnim=true,SwimIdleAnim=true,
+	IdleAnim=true,FallAnim=true,ClimbAnim=true,Walk=true,Jump=true,Run=true,
+	Swim=true,SwimIdle=true,Idle=true,Fall=true,Climb=true,
+	Walking=true,Jumping=true,Running=true,Swimming=true,SwimIdling=true,
+	Idling=true,Falling=true,Climbing=true,
+	ToolNone=true,ToolSlash=true,ToolLunge=true,ToolBlock=true,
+}
+
+local ABOn=false, abRange=25, abHold=0.20
+local hooked={}, pingComp=true, pingCompMs=50
+local tradeOn=false, tradeDelay=0.04
+local trading=false, tradedThisBlock=false, tradeStartTime=0
+local blockEndTimer=nil
+
+local currentId=nil, currentTrack=nil, currentDuration=0
+local playbackSpeed=1, paused=false, loopPlayback=true
+local previewRig, previewHum, previewWorld, previewViewport, previewCamera
+local logRange=120, logHooked={}, logEntries={}
+
+local selfLogOn=false, selfLogHooked={}, selfLogMax=300
+local selfRehookConn=nil
+
+local enemyLogOn=true
+
+local skipNames = movementNames
+
+local function getInput()
+	local bp = LP:FindFirstChild("Backpack")
+	if bp then
+		local inp = bp:FindFirstChild("Input")
+		if inp and inp:IsA("RemoteEvent") then return inp end
+	end
+	local char = LP.Character
+	if char then
+		local traits = char:FindFirstChild("ServerTraits")
+		if traits then
+			local inp = traits:FindFirstChild("Input")
+			if inp and inp:IsA("RemoteEvent") then return inp end
+		end
+	end
+	local bpTraits = bp and bp:FindFirstChild("ServerTraits")
+	if bpTraits then
+		local inp = bpTraits:FindFirstChild("Input")
+		if inp and inp:IsA("RemoteEvent") then return inp end
+	end
+	for _, v in ipairs(LP:GetDescendants()) do
+		if v:IsA("RemoteEvent") and v.Name == "Input" then return v end
+	end
+	return nil
+end
+
+local function nearestTarget()
+	local myChar = LP.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	if not myRoot then return nil end
+	local best, bestD = nil, math.huge
+	for hum in pairs(hooked) do
+		local model = hum.Parent
+		if model and model.Parent and model ~= myChar then
+			local root = model:FindFirstChild("HumanoidRootPart")
+			if root then
+				local d = (myRoot.Position - root.Position).Magnitude
+				if d < bestD then best, bestD = root, d end
+			end
+		end
+	end
+	return best
+end
+
+local function fireM1()
+	local input = getInput(); if not input then return end
+	local char = LP.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local cam = workspace.CurrentCamera
+	local target = nearestTarget()
+	local hitPos, lookDir
+	if target then
+		hitPos = target.Position
+		lookDir = (target.Position - (root and root.Position or cam.CFrame.Position))
+		if lookDir.Magnitude > 0 then lookDir = lookDir.Unit else lookDir = cam.CFrame.LookVector end
+	elseif cam then
+		local origin = root and root.Position or cam.CFrame.Position
+		lookDir = cam.CFrame.LookVector
+		hitPos = origin + lookDir * 10
+	else
+		hitPos = root and (root.Position + root.CFrame.LookVector * 10) or Vector3.new()
+		lookDir = root and root.CFrame.LookVector or Vector3.new(0,0,-1)
+	end
+	local mouseHit = CFrame.new(hitPos, hitPos + lookDir)
+	local d = {[1]="M1",[2]={air=false,md=Vector3.new(0,0,0),mousehit=mouseHit,skeydown=true,skeyreal=false},n=2}
+	local u = {[1]="M1",[2]={air=false,md=Vector3.new(0,0,0),mousehit=mouseHit,skeydown=false,skeyreal=true},n=2}
+	pcall(function() input:FireServer(unpack(d,1,d.n)) end)
+	task.wait(0.05)
+	pcall(function() input:FireServer(unpack(u,1,u.n)) end)
+end
+
+local function blockPulse(duration)
+	local input = getInput(); if not input then return end
+	if blockEndTimer then pcall(function() blockEndTimer:Cancel() end) blockEndTimer=nil end
+	pcall(function() input:FireServer("BlockOn") end)
+	blockEndTimer = task.delay(duration, function()
+		local i = getInput()
+		if i then pcall(function() i:FireServer("BlockOff") end) end
+		blockEndTimer = nil
+	end)
+end
+
+local function fireBlock()
+	local holdTime = abHold + (pingComp and (pingCompMs/1000) or 0)
+	blockPulse(holdTime)
+end
+
+local function doTrade()
+	if not tradeOn then return end
+	if trading then
+		if tick()-tradeStartTime > 2 then trading=false else return end
+	end
+	if tradedThisBlock then return end
+	trading=true; tradedThisBlock=true; tradeStartTime=tick()
+	task.spawn(function()
+		pcall(function()
+			local holdTime = abHold + (pingComp and (pingCompMs/1000) or 0)
+			task.wait(holdTime + tradeDelay)
+			if tradeOn then fireM1() end
+		end)
+		task.wait(0.6); trading=false
+	end)
+end
+
+local function respondTo(animId)
+	local mode = responses[animId] or "Block"
+	if mode == "None" then return end
+	if mode == "Block" then
+		fireBlock()
+	elseif mode == "M1Trade" then
+		fireBlock(); tradedThisBlock=false
+		if tradeOn then doTrade() end
+	end
+end
+
+local function onAttack(animId)
+	if ABOn then fireBlock() end
+	tradedThisBlock=false
+	if tradeOn then doTrade() end
+	if animId then respondTo(animId) end
+end
+
+local function hookCombat(hum)
+	if not hum or not hum:IsA("Humanoid") then return end
+	if hooked[hum] then return end
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		task.spawn(function()
+			local t=0
+			while hum.Parent and not animator and t<5 do task.wait(0.1); t+=0.1 end
+			if animator then hookCombat(hum) end
+		end); return
+	end
+	hooked[hum]=true
+	local model = hum.Parent
+	animator.AnimationPlayed:Connect(function(track)
+		if not model or not model.Parent then return end
+		local anim = track.Animation; if not anim then return end
+		local id = anim.AnimationId
+		if not id or not atkIds[id] then return end
+		local myChar = LP.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		local theirRoot = model:FindFirstChild("HumanoidRootPart")
+		if not myRoot or not theirRoot then return end
+		if (myRoot.Position-theirRoot.Position).Magnitude > abRange then return end
+		onAttack(id)
+	end)
+end
+
+local function startCombatHooks()
+	local function scan(c)
+		if c:IsA("Model") then
+			local h = c:FindFirstChildOfClass("Humanoid")
+			if h then hookCombat(h) end
+		end
+	end
+	local live = workspace:FindFirstChild("Live")
+	if live then for _,c in ipairs(live:GetChildren()) do scan(c) end; live.ChildAdded:Connect(scan) end
+	local p = workspace:FindFirstChild("Players")
+	if p then for _,c in ipairs(p:GetChildren()) do scan(c) end; p.ChildAdded:Connect(scan) end
+	workspace.DescendantAdded:Connect(function(o)
+		if o:IsA("Humanoid") then hookCombat(o) end
+	end)
+end
+
+local Window = Airflow:CreateWindow({
+	Name = "outlaw.dev",
+	LoadingSubtitle = "anim editor",
+	ToggleUIKeybind = "RightControl",
+	Loading = false,
+	ConfigurationSaving = {Enabled=true, FolderName="outlaw.dev", FileName="default"},
+	Home = {Name="Home", Stats={"FPS","Ping","Game","Time"}},
+})
+
+local BlockTab  = Window:CreateTab("Auto Block", "shield")
+local TradeTab  = Window:CreateTab("M1 Trade", "sword")
+local EditorTab = Window:CreateTab("Animation Editor", "radio")
+local SelfTab   = Window:CreateTab("Animation Logger (Me)", "user")
+
+BlockTab:CreateSection("Auto Block")
+BlockTab:CreateToggle({
+	Name="Auto Block", CurrentValue=false, Flag="AB_On",
+	Callback=function(v) ABOn=v; if v then startCombatHooks() end end,
+})
+BlockTab:CreateToggle({Name="Ping Compensation", CurrentValue=true, Flag="AB_Ping",
+	Callback=function(v) pingComp=v end})
+BlockTab:CreateSlider({Name="Ping Compensation (ms)", Range={0,200}, Increment=5, Suffix="ms",
+	CurrentValue=50, Flag="AB_PingMs", Callback=function(v) pingCompMs=v end})
+BlockTab:CreateSlider({Name="Block Range", Range={0,200}, Increment=1, CurrentValue=25,
+	Flag="AB_Range", Callback=function(v) abRange=v end})
+BlockTab:CreateSlider({Name="Block Hold Time", Range={0.1,2}, Increment=0.01, Suffix="s",
+	CurrentValue=0.20, Flag="AB_Hold", Callback=function(v) abHold=v end})
+BlockTab:CreateSection("Manual Test")
+BlockTab:CreateButton({Name="Test BlockOn", Callback=function()
+	local i=getInput(); if not i then return Airflow:Notify("outlaw.dev","Input not found",3) end
+	pcall(function() i:FireServer("BlockOn") end)
+end})
+BlockTab:CreateButton({Name="Test BlockOff", Callback=function()
+	local i=getInput(); if not i then return Airflow:Notify("outlaw.dev","Input not found",3) end
+	pcall(function() i:FireServer("BlockOff") end)
+end})
+
+TradeTab:CreateSection("M1 Trade")
+TradeTab:CreateToggle({
+	Name="M1 Trade", CurrentValue=false, Flag="MT_On",
+	Callback=function(v) tradeOn=v; if v then startCombatHooks() end end,
+})
+TradeTab:CreateSlider({Name="Delay After Block", Range={0,1}, Increment=0.01, Suffix="s",
+	CurrentValue=0.04, Flag="MT_Delay", Callback=function(v) tradeDelay=v end})
+TradeTab:CreateSection("Manual Test")
+TradeTab:CreateButton({Name="Test Fire M1", Callback=function()
+	fireM1(); Airflow:Notify("outlaw.dev","M1 fired",2)
+end})
+TradeTab:CreateButton({Name="Force Reset Trade Lock", Callback=function()
+	trading=false; tradedThisBlock=false; tradeStartTime=0
+	Airflow:Notify("outlaw.dev","Reset",2)
+end})
+
+EditorTab:CreateSection("Windows")
+EditorTab:CreateToggle({Name="Show Visualizer Window", CurrentValue=true, Flag="ED_ShowVisualizer",
+	Callback=function(v) if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible=v end end})
+EditorTab:CreateToggle({Name="Show Info Logger (Enemy)", CurrentValue=true, Flag="ED_ShowLogger",
+	Callback=function(v) if getgenv().OutlawLogger then getgenv().OutlawLogger.Visible=v end end})
+EditorTab:CreateToggle({Name="Show Self Logger", CurrentValue=true, Flag="ED_ShowSelfLogger",
+	Callback=function(v) if getgenv().OutlawSelfLogger then getgenv().OutlawSelfLogger.Visible=v end end})
+EditorTab:CreateSection("Visualizer Scale")
+EditorTab:CreateButton({Name="Scale -10%", Callback=function()
+	if getgenv().OutlawSetVisScale then getgenv().OutlawSetVisScale((getgenv().OutlawVisScale or 1)-0.1) end
+end})
+EditorTab:CreateButton({Name="Scale +10%", Callback=function()
+	if getgenv().OutlawSetVisScale then getgenv().OutlawSetVisScale((getgenv().OutlawVisScale or 1)+0.1) end
+end})
+EditorTab:CreateButton({Name="Scale Reset (1.0)", Callback=function()
+	if getgenv().OutlawSetVisScale then getgenv().OutlawSetVisScale(1) end
+end})
+EditorTab:CreateToggle({Name="Fit Rig To Viewport", CurrentValue=true, Flag="ED_AutoFit",
+	Callback=function(v) getgenv().OutlawAutoFit = v end})
+
+EditorTab:CreateSection("Log Range")
+local rangeLbl = EditorTab:CreateLabel("Range: " .. logRange)
+EditorTab:CreateButton({Name="Range -20", Callback=function()
+	logRange=math.max(20, logRange-20); rangeLbl:Set("Range: "..logRange) end})
+EditorTab:CreateButton({Name="Range +20", Callback=function()
+	logRange=math.min(500, logRange+20); rangeLbl:Set("Range: "..logRange) end})
+
+EditorTab:CreateSection("Playback")
+EditorTab:CreateLabel("Space or Pause button toggles pause.")
+EditorTab:CreateButton({Name="Stop Current", Callback=function()
+	if currentTrack then pcall(function() currentTrack:Stop() end); currentTrack=nil; paused=false end
+	Airflow:Notify("outlaw.dev","Stopped",2)
+end})
+
+SelfTab:CreateSection("Self Logger")
+SelfTab:CreateToggle({Name="Auto Logger (Me)", CurrentValue=false, Flag="SL_On",
+	Callback=function(v)
+		selfLogOn = v
+		if v then hookSelfLogger() else unhookSelfLogger() end
+	end})
+SelfTab:CreateToggle({Name="Whitelist Only", CurrentValue=true, Flag="SL_WhitelistOnly",
+	Callback=function(v) getgenv().OutlawSelfWhitelistOnly = v end})
+SelfTab:CreateSection("Response (Enemy animation -> my action)")
+SelfTab:CreateToggle({Name="Auto Logger (Enemy)", CurrentValue=true, Flag="SL_EnemyOn",
+	Callback=function(v) enemyLogOn=v end})
+SelfTab:CreateLabel("Per-animation response set from Info Logger rows.")
+SelfTab:CreateLabel("Left-click row -> open in visualizer. Right-click -> cycle response.")
+SelfTab:CreateSection("Self Whitelist")
+local whitelistLbl = SelfTab:CreateLabel("Entries: " .. (function()
+	local n=0; for _ in pairs(selfWhitelist) do n+=1 end; return n
+end)())
+SelfTab:CreateInput({Name="Add Anim ID", PlaceholderText="rbxassetid://XXXXXXXXX",
+	CurrentValue="", Flag="SL_NewId", Callback=function(v) getgenv().OutlawSelfNewId=v end})
+SelfTab:CreateInput({Name="Add Label", PlaceholderText="M1_5",
+	CurrentValue="", Flag="SL_NewLbl", Callback=function(v) getgenv().OutlawSelfNewLbl=v end})
+SelfTab:CreateButton({Name="Add To Whitelist", Callback=function()
+	local id = getgenv().OutlawSelfNewId
+	if not id or id == "" then return Airflow:Notify("outlaw.dev","No id",2) end
+	selfWhitelist[id] = (getgenv().OutlawSelfNewLbl ~= "" and getgenv().OutlawSelfNewLbl) or "custom"
+	local n=0; for _ in pairs(selfWhitelist) do n+=1 end
+	whitelistLbl:Set("Entries: "..n)
+	Airflow:Notify("outlaw.dev","Added "..id,2)
+end})
+SelfTab:CreateButton({Name="Remove Last Whitelist Entry", Callback=function()
+	local last
+	for k in pairs(selfWhitelist) do last = k end
+	if last then selfWhitelist[last] = nil end
+	local n=0; for _ in pairs(selfWhitelist) do n+=1 end
+	whitelistLbl:Set("Entries: "..n)
+	Airflow:Notify("outlaw.dev","Removed "..tostring(last),2)
+end})
+SelfTab:CreateSection("Clear")
+SelfTab:CreateButton({Name="Clear Self Log", Callback=function()
+	if getgenv().OutlawSelfClear then getgenv().OutlawSelfClear() end
+end})
+
+-- ============================================================
+-- VISUALIZER
+-- ============================================================
+local visGui
+local combined
+local visBaseW, visBaseH = 620, 400
+getgenv().OutlawVisScale = 1
+getgenv().OutlawAutoFit = true
+
+local function buildVisualizer()
+	visGui = Instance.new("ScreenGui")
+	visGui.Name="OutlawVisualizer"; visGui.ResetOnSpawn=false
+	visGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+	pcall(function() visGui.Parent=gethui() end)
+	if not visGui.Parent then pcall(function() visGui.Parent=game:GetService("CoreGui") end) end
+	if not visGui.Parent then visGui.Parent=LP:WaitForChild("PlayerGui") end
+
+	combined = Instance.new("Frame")
+	combined.Name="VisualizerWindow"
+	combined.Size=UDim2.new(0, visBaseW, 0, visBaseH)
+	combined.Position=UDim2.new(0.5, -visBaseW/2, 0.5, -visBaseH/2)
+	combined.BackgroundColor3=Color3.fromRGB(15,15,15)
+	combined.BorderSizePixel=0; combined.Active=true; combined.Draggable=true; combined.Visible=true
+	combined.Parent=visGui
+	local wc=Instance.new("UICorner"); wc.CornerRadius=UDim.new(0,4); wc.Parent=combined
+	local ws=Instance.new("UIStroke"); ws.Color=Color3.fromRGB(60,60,60); ws.Thickness=1; ws.Parent=combined
+
+	local title=Instance.new("TextLabel")
+	title.Size=UDim2.new(1,-20,0,22); title.Position=UDim2.new(0,10,0,4)
+	title.BackgroundTransparency=1; title.Text="Animation Visualizer & Editor"
+	title.Font=Enum.Font.GothamBold; title.TextSize=13
+	title.TextColor3=Color3.fromRGB(230,230,230); title.TextXAlignment=Enum.TextXAlignment.Left
+	title.Parent=combined
+
+	local closeX=Instance.new("TextButton")
+	closeX.Size=UDim2.new(0,20,0,20); closeX.Position=UDim2.new(1,-24,0,4)
+	closeX.BackgroundTransparency=1; closeX.Text="X"
+	closeX.Font=Enum.Font.GothamBold; closeX.TextSize=12
+	closeX.TextColor3=Color3.fromRGB(220,220,220); closeX.BorderSizePixel=0; closeX.Parent=combined
+	closeX.MouseButton1Click:Connect(function() combined.Visible=false end)
+
+	local vpW, vpH = 400, 260
+	previewViewport=Instance.new("ViewportFrame")
+	previewViewport.Size=UDim2.new(0,vpW,0,vpH)
+	previewViewport.Position=UDim2.new(0,10,0,28)
+	previewViewport.BackgroundColor3=Color3.fromRGB(30,30,30)
+	previewViewport.BorderSizePixel=0; previewViewport.Parent=combined
+	local vc=Instance.new("UICorner"); vc.CornerRadius=UDim.new(0,2); vc.Parent=previewViewport
+	local vs=Instance.new("UIStroke"); vs.Color=Color3.fromRGB(80,80,80); vs.Thickness=1; vs.Parent=previewViewport
+
+	previewCamera=Instance.new("Camera")
+	previewCamera.FieldOfView=60
+	previewCamera.Parent=previewViewport
+	previewViewport.CurrentCamera=previewCamera
+
+	previewWorld=Instance.new("WorldModel"); previewWorld.Parent=previewViewport
+
+	local plate=Instance.new("Part")
+	plate.Name="PreviewFloor"
+	plate.Size=Vector3.new(64,0.2,64); plate.Position=Vector3.new(0,-0.1,0)
+	plate.Anchored=true; plate.CanCollide=false
+	plate.Color=Color3.fromRGB(60,60,60); plate.Material=Enum.Material.SmoothPlastic
+	plate.Parent=previewWorld
+
+	local idBar=Instance.new("TextLabel")
+	idBar.Size=UDim2.new(0,vpW,0,20); idBar.Position=UDim2.new(0,10,0,28+vpH+6)
+	idBar.BackgroundColor3=Color3.fromRGB(20,20,20); idBar.BorderSizePixel=0
+	idBar.Text="rbxassetid://0"; idBar.Font=Enum.Font.Gotham; idBar.TextSize=12
+	idBar.TextColor3=Color3.fromRGB(200,200,200); idBar.TextXAlignment=Enum.TextXAlignment.Left
+	idBar.Parent=combined
+	local ibr=Instance.new("UICorner"); ibr.CornerRadius=UDim.new(0,2); ibr.Parent=idBar
+	local idPad=Instance.new("UIPadding"); idPad.PaddingLeft=UDim.new(0,6); idPad.Parent=idBar
+
+	local scrubY = 28+vpH+30
+	local scrubBg=Instance.new("Frame")
+	scrubBg.Size=UDim2.new(0,vpW,0,14); scrubBg.Position=UDim2.new(0,10,0,scrubY)
+	scrubBg.BackgroundColor3=Color3.fromRGB(35,35,35); scrubBg.BorderSizePixel=0; scrubBg.Parent=combined
+	local sbc=Instance.new("UICorner"); sbc.CornerRadius=UDim.new(0,3); sbc.Parent=scrubBg
+	local scrubFill=Instance.new("Frame")
+	scrubFill.Size=UDim2.new(0,0,1,0); scrubFill.BackgroundColor3=Color3.fromRGB(200,200,200)
+	scrubFill.BorderSizePixel=0; scrubFill.Parent=scrubBg
+	local sfc=Instance.new("UICorner"); sfc.CornerRadius=UDim.new(0,3); sfc.Parent=scrubFill
+
+	local timeLbl=Instance.new("TextLabel")
+	timeLbl.Size=UDim2.new(0,vpW,0,16); timeLbl.Position=UDim2.new(0,10,0,scrubY+18)
+	timeLbl.BackgroundTransparency=1; timeLbl.Text="0.000s / 0.000s"
+	timeLbl.Font=Enum.Font.Gotham; timeLbl.TextSize=11
+	timeLbl.TextColor3=Color3.fromRGB(180,180,180); timeLbl.TextXAlignment=Enum.TextXAlignment.Left
+	timeLbl.Parent=combined
+
+	local ctrlRow=Instance.new("Frame")
+	ctrlRow.Size=UDim2.new(0,vpW,0,30); ctrlRow.Position=UDim2.new(0,10,0,scrubY+38)
+	ctrlRow.BackgroundTransparency=1; ctrlRow.Parent=combined
+
+	local function mkBtn(text,x,w,col)
+		local b=Instance.new("TextButton")
+		b.Size=UDim2.new(0,w,0,28); b.Position=UDim2.new(0,x,0,0)
+		b.BackgroundColor3=col; b.Text=text
+		b.Font=Enum.Font.GothamBold; b.TextSize=12
+		b.TextColor3=Color3.new(1,1,1); b.BorderSizePixel=0; b.Parent=ctrlRow
+		local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,3); c.Parent=b
+		return b
+	end
+	local btnPlay  = mkBtn("Play",0,70,Color3.fromRGB(50,130,50))
+	local btnPause = mkBtn("Pause",76,70,Color3.fromRGB(130,100,40))
+	local btnStop  = mkBtn("Stop",152,70,Color3.fromRGB(140,50,50))
+	local btnSpeed = mkBtn("Speed 1x",228,90,Color3.fromRGB(60,60,90))
+	local btnLoop  = mkBtn("Loop ON",324,76,Color3.fromRGB(70,70,100))
+
+	local qpW=200
+	local qp=Instance.new("Frame")
+	qp.Name="QuickEditPanel"
+	qp.Size=UDim2.new(0,qpW,0,visBaseH-44); qp.Position=UDim2.new(1,-(qpW+10),0,28)
+	qp.BackgroundColor3=Color3.fromRGB(20,20,20); qp.BorderSizePixel=0; qp.Parent=combined
+	local qpc=Instance.new("UICorner"); qpc.CornerRadius=UDim.new(0,4); qpc.Parent=qp
+	local qps=Instance.new("UIStroke"); qps.Color=Color3.fromRGB(60,60,60); qps.Thickness=1; qps.Parent=qp
+
+	local qTitle=Instance.new("TextLabel")
+	qTitle.Size=UDim2.new(1,-16,0,22); qTitle.Position=UDim2.new(0,8,0,4)
+	qTitle.BackgroundTransparency=1; qTitle.Text="Quick Edit Timing"
+	qTitle.Font=Enum.Font.GothamBold; qTitle.TextSize=12
+	qTitle.TextColor3=Color3.fromRGB(230,230,230); qTitle.TextXAlignment=Enum.TextXAlignment.Left
+	qTitle.Parent=qp
+
+	local fields={}
+	local yPos=30
+	local function addField(name,default)
+		local row=Instance.new("Frame")
+		row.Size=UDim2.new(1,-16,0,24); row.Position=UDim2.new(0,8,0,yPos)
+		row.BackgroundTransparency=1; row.Parent=qp
+		local lbl=Instance.new("TextLabel")
+		lbl.Size=UDim2.new(0,88,1,0); lbl.BackgroundTransparency=1
+		lbl.Text=name..":"; lbl.Font=Enum.Font.Gotham; lbl.TextSize=11
+		lbl.TextColor3=Color3.fromRGB(220,220,220); lbl.TextXAlignment=Enum.TextXAlignment.Right
+		lbl.Parent=row
+		local box=Instance.new("TextBox")
+		box.Size=UDim2.new(0,84,0,20); box.Position=UDim2.new(1,-84,0.5,-10)
+		box.BackgroundColor3=Color3.fromRGB(30,30,30); box.BorderSizePixel=0
+		box.Text=default or ""; box.Font=Enum.Font.Gotham; box.TextSize=11
+		box.TextColor3=Color3.fromRGB(230,230,230); box.ClearTextOnFocus=false; box.Parent=row
+		local bc=Instance.new("UICorner"); bc.CornerRadius=UDim.new(0,2); bc.Parent=box
+		fields[name]=box; yPos+=26
+	end
+	addField("Delay (s)","0.248"); addField("Hitbox X","9"); addField("Hitbox Y","10")
+	addField("Hitbox Z","10"); addField("HSO","3"); addField("Max Dist","85")
+	addField("Repeat","1"); addField("Rep Delay","0.35")
+
+	local dodgeRow=Instance.new("Frame")
+	dodgeRow.Size=UDim2.new(1,-16,0,24); dodgeRow.Position=UDim2.new(0,8,0,yPos)
+	dodgeRow.BackgroundTransparency=1; dodgeRow.Parent=qp
+	local dLbl=Instance.new("TextLabel")
+	dLbl.Size=UDim2.new(0,88,1,0); dLbl.BackgroundTransparency=1
+	dLbl.Text="Response:"; dLbl.Font=Enum.Font.Gotham; dLbl.TextSize=11
+	dLbl.TextColor3=Color3.fromRGB(220,220,220); dLbl.TextXAlignment=Enum.TextXAlignment.Right
+	dLbl.Parent=dodgeRow
+	local dBox=Instance.new("TextButton")
+	dBox.Size=UDim2.new(0,84,0,20); dBox.Position=UDim2.new(1,-84,0.5,-10)
+	dBox.BackgroundColor3=Color3.fromRGB(30,30,30); dBox.BorderSizePixel=0
+	dBox.Text="Block"; dBox.Font=Enum.Font.Gotham; dBox.TextSize=11
+	dBox.TextColor3=Color3.fromRGB(230,230,230); dBox.Parent=dodgeRow
+	local dbc=Instance.new("UICorner"); dbc.CornerRadius=UDim.new(0,2); dbc.Parent=dBox
+	local dopts={"Block","M1Trade","None"}
+	local didx=1
+	dBox.MouseButton1Click:Connect(function()
+		didx+=1; if didx>#dopts then didx=1 end
+		dBox.Text=dopts[didx]
+		if currentId then responses[currentId]=dopts[didx] end
+	end)
+
+	local saveBtn=Instance.new("TextButton")
+	saveBtn.Size=UDim2.new(1,-16,0,28); saveBtn.Position=UDim2.new(0,8,1,-34)
+	saveBtn.BackgroundColor3=Color3.fromRGB(230,230,230); saveBtn.Text="Save & Apply"
+	saveBtn.Font=Enum.Font.GothamBold; saveBtn.TextSize=12
+	saveBtn.TextColor3=Color3.fromRGB(20,20,20); saveBtn.BorderSizePixel=0; saveBtn.Parent=qp
+	local svc=Instance.new("UICorner"); svc.CornerRadius=UDim.new(0,3); svc.Parent=saveBtn
+
+	-- ===== Rig framing: compute bounding box and frame camera =====
+	local function frameRigToViewport(model)
+		if not model or not previewCamera or not previewViewport then return end
+		-- collect base parts
+		local parts = {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then table.insert(parts, d) end
+		end
+		if #parts == 0 then return end
+
+		-- bbox
+		local minV = Vector3.new(math.huge,math.huge,math.huge)
+		local maxV = Vector3.new(-math.huge,-math.huge,-math.huge)
+		for _, p in ipairs(parts) do
+			local cf = p.CFrame
+			local sz = p.Size * 0.5
+			-- sample 8 corners in world
+			for sx = -1, 1, 2 do
+				for sy = -1, 1, 2 do
+					for sz2 = -1, 1, 2 do
+						local corner = (cf * CFrame.new(sz.X*sx, sz.Y*sy, sz.Z*sz2)).Position
+						minV = Vector3.new(math.min(minV.X,corner.X), math.min(minV.Y,corner.Y), math.min(minV.Z,corner.Z))
+						maxV = Vector3.new(math.max(maxV.X,corner.X), math.max(maxV.Y,corner.Y), math.max(maxV.Z,corner.Z))
+					end
+				end
+			end
+		end
+		local center = (minV + maxV) * 0.5
+		local size = maxV - minV
+		local maxDim = math.max(size.X, size.Y, size.Z)
+		-- fov margin
+		local fov = previewCamera.FieldOfView
+		local aspect = previewViewport.AbsoluteSize.X / math.max(1, previewViewport.AbsoluteSize.Y)
+		-- vertical fov in radians
+		local vfov = math.rad(fov)
+		local hfov = 2 * math.atan(math.tan(vfov/2) * aspect)
+		local distV = (size.Y * 0.5) / math.tan(vfov/2)
+		local distH = (maxDim * 0.5) / math.tan(hfov/2)
+		local dist = math.max(distV, distH) * 1.35 + 2
+		-- slight downward + in front
+		local lookAt = center
+		local camPos = center + Vector3.new(0, size.Y * 0.10, -dist)
+		previewCamera.CFrame = CFrame.new(camPos, lookAt)
+		previewCamera.FieldOfView = math.clamp(fov, 30, 100)
+	end
+	getgenv().OutlawFrameRig = frameRigToViewport
+
+	local function buildRig()
+		if not previewWorld then return end
+		for _, c in ipairs(previewWorld:GetChildren()) do
+			if c.Name ~= "PreviewFloor" then c:Destroy() end
+		end
+		previewRig, previewHum = nil, nil
+		local char = LP.Character
+		if not char then return end
+		local ok2, clone = pcall(function() return char:Clone() end)
+		if not ok2 or not clone then return end
+		clone.Name = "PreviewRig"
+		for _, d in ipairs(clone:GetDescendants()) do
+			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("Sound") or d:IsA("ParticleEmitter") then
+				d:Destroy()
+			end
+		end
+		clone.Parent = previewWorld
+		-- anchor everything so it stays put and the viewport can frame it
+		for _, p in ipairs(clone:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.Anchored = true
+			end
+		end
+		local hrp = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
+		local torso = clone:FindFirstChild("Torso") or clone:FindFirstChild("UpperTorso") or clone:FindFirstChild("LowerTorso")
+		local pivot = hrp or torso
+		if pivot then
+			clone:PivotTo(CFrame.new(0, 3, 0))
+		end
+		local hum = clone:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			local old = hum:FindFirstChildOfClass("Animator")
+			if old then old:Destroy() end
+			local a = Instance.new("Animator"); a.Parent = hum
+			previewHum = hum
+		end
+		previewRig = clone
+		-- wait a frame for CFrame propagation, then frame
+		task.defer(function()
+			task.wait(0.05)
+			if getgenv().OutlawAutoFit and previewRig then
+				frameRigToViewport(previewRig)
+			end
+		end)
+	end
+	getgenv().OutlawRebuildRig = buildRig
+
+	buildRig()
+
+	-- rewire character change: rebuild rig AND self logger
+	LP.CharacterAdded:Connect(function()
+		task.wait(0.75)
+		buildRig()
+		-- reframe after the rig settles
+		task.wait(0.5)
+		if getgenv().OutlawAutoFit and previewRig then
+			frameRigToViewport(previewRig)
+		end
+	end)
+
+	local pausedTime=0
+	local function stopPlayback()
+		if currentTrack then pcall(function() currentTrack:Stop() end); currentTrack=nil end
+		paused=false
+		scrubFill.Size=UDim2.new(0,0,1,0)
+		timeLbl.Text="0.000s / 0.000s"
+		btnPause.Text="Pause"
+	end
+	local function playAnim(id)
+		if not previewHum then buildRig() end
+		if not previewHum then return end
+		stopPlayback()
+		local anim=Instance.new("Animation"); anim.AnimationId=id
+		local okA, track = pcall(function() return previewHum:LoadAnimation(anim) end)
+		if not okA or not track then return end
+		track.Looped=loopPlayback; track:Play()
+		pcall(function() track:AdjustSpeed(playbackSpeed) end)
+		currentTrack=track; currentDuration=track.Length or 0
+		paused=false; btnPause.Text="Pause"
+	end
+	local function togglePause()
+		if not currentTrack then return end
+		paused = not paused
+		if paused then
+			pausedTime=currentTrack.TimePosition
+			pcall(function() currentTrack:AdjustSpeed(0) end)
+			pcall(function() currentTrack:Pause() end)
+			btnPause.Text="Resume"
+		else
+			pcall(function() currentTrack:Play() end)
+			pcall(function() currentTrack.TimePosition=pausedTime end)
+			pcall(function() currentTrack:AdjustSpeed(playbackSpeed) end)
+			btnPause.Text="Pause"
+		end
+	end
+	RunService.RenderStepped:Connect(function()
+		if not currentTrack then return end
+		if paused then pcall(function() currentTrack.TimePosition=pausedTime end) end
+		local t=currentTrack.TimePosition or 0
+		local dur=currentTrack.Length or currentDuration or 0
+		currentDuration=dur
+		local frac = dur>0 and (t/dur) or 0
+		if frac>1 then frac=1 end
+		scrubFill.Size=UDim2.new(frac,0,1,0)
+		timeLbl.Text=string.format("%.3fs / %.3fs", t, dur)
+	end)
+
+	local scrubDragging=false
+	scrubBg.InputBegan:Connect(function(input)
+		if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+			scrubDragging=true
+		end
+	end)
+	scrubBg.InputChanged:Connect(function(input)
+		if scrubDragging and currentTrack and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+			local left=scrubBg.AbsolutePosition.X
+			local width=scrubBg.AbsoluteSize.X
+			if width>0 then
+				local f=math.clamp((input.Position.X-left)/width,0,1)
+				pausedTime=f*(currentTrack.Length or 0)
+				pcall(function() currentTrack.TimePosition=pausedTime end)
+			end
+		end
+	end)
+	scrubBg.InputEnded:Connect(function(input)
+		if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+			scrubDragging=false
+		end
+	end)
+
+	btnPlay.MouseButton1Click:Connect(function() if currentId then playAnim(currentId) end end)
+	btnPause.MouseButton1Click:Connect(togglePause)
+	btnStop.MouseButton1Click:Connect(stopPlayback)
+
+	local speeds={0.1,0.25,0.5,1,1.5,2}
+	local sIdx=4
+	btnSpeed.MouseButton1Click:Connect(function()
+		sIdx+=1; if sIdx>#speeds then sIdx=1 end
+		playbackSpeed=speeds[sIdx]
+		btnSpeed.Text="Speed "..tostring(playbackSpeed).."x"
+		if currentTrack and not paused then pcall(function() currentTrack:AdjustSpeed(playbackSpeed) end) end
+	end)
+	btnLoop.MouseButton1Click:Connect(function()
+		loopPlayback = not loopPlayback
+		btnLoop.Text = loopPlayback and "Loop ON" or "Loop OFF"
+		if currentTrack then pcall(function() currentTrack.Looped=loopPlayback end) end
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, gp)
+		if gp then return end
+		if input.KeyCode==Enum.KeyCode.Space then togglePause() end
+	end)
+
+	saveBtn.MouseButton1Click:Connect(function()
+		if not currentId then return end
+		atkIds[currentId]=true
+		timing[currentId]={
+			delay=tonumber(fields["Delay (s)"].Text) or 0.248,
+			hitboxX=tonumber(fields["Hitbox X"].Text) or 9,
+			hitboxY=tonumber(fields["Hitbox Y"].Text) or 10,
+			hitboxZ=tonumber(fields["Hitbox Z"].Text) or 10,
+			hso=tonumber(fields["HSO"].Text) or 3,
+			maxDist=tonumber(fields["Max Dist"].Text) or 85,
+			repeatN=tonumber(fields["Repeat"].Text) or 1,
+			repDelay=tonumber(fields["Rep Delay"].Text) or 0.35,
+			response=dBox.Text,
+		}
+		responses[currentId]=dBox.Text
+		Airflow:Notify("outlaw.dev","Saved: "..currentId,3)
+		print("[Visualizer] Saved:", currentId, timing[currentId], "resp="..dBox.Text)
+	end)
+
+	getgenv().OutlawSelectAnim = function(id)
+		currentId=id; idBar.Text=id
+		combined.Visible=true
+		playAnim(id)
+		local t=timing[id]
+		if t then
+			fields["Delay (s)"].Text=tostring(t.delay or "0.248")
+			fields["Hitbox X"].Text=tostring(t.hitboxX or "9")
+			fields["Hitbox Y"].Text=tostring(t.hitboxY or "10")
+			fields["Hitbox Z"].Text=tostring(t.hitboxZ or "10")
+			fields["HSO"].Text=tostring(t.hso or "3")
+			fields["Max Dist"].Text=tostring(t.maxDist or "85")
+			fields["Repeat"].Text=tostring(t.repeatN or "1")
+			fields["Rep Delay"].Text=tostring(t.repDelay or "0.35")
+		end
+		local r=responses[id] or "Block"
+		dBox.Text=r
+		for i,v in ipairs(dopts) do if v==r then didx=i break end end
+	end
+
+	getgenv().OutlawSetVisScale = function(s)
+		s=math.clamp(s,0.4,2.0)
+		getgenv().OutlawVisScale=s
+		local existing=combined:FindFirstChildOfClass("UIScale")
+		if not existing then existing=Instance.new("UIScale"); existing.Parent=combined end
+		existing.Scale=s
+		combined.Size=UDim2.new(0, visBaseW, 0, visBaseH)
+	end
+
+	getgenv().OutlawVisualizer=combined
+end
+
+task.spawn(function() task.wait(1); buildVisualizer() end)
+
+-- ============================================================
+-- ENEMY INFO LOGGER
+-- ============================================================
+local loggerWin, loggerScroll, loggerTitle
+local loggerRows = {}
+
+local function buildLogger()
+	if getgenv().OutlawLogger then return end
+	local gui = visGui
+	if not gui then
+		gui = Instance.new("ScreenGui")
+		gui.Name="OutlawLoggerOnly"; gui.ResetOnSpawn=false
+		pcall(function() gui.Parent=gethui() end)
+		if not gui.Parent then pcall(function() gui.Parent=game:GetService("CoreGui") end) end
+		if not gui.Parent then gui.Parent=LP:WaitForChild("PlayerGui") end
+	end
+	local screenW=workspace.CurrentCamera.ViewportSize.X
+	local screenH=workspace.CurrentCamera.ViewportSize.Y
+	local winW,winH=340,260
+	local cx=math.floor((screenW-winW)/2)
+	local cy=math.floor((screenH-winH)/2)
+
+	loggerWin=Instance.new("Frame")
+	loggerWin.Name="InfoLogger"
+	loggerWin.Size=UDim2.new(0,winW,0,winH)
+	loggerWin.Position=UDim2.new(0,cx,0,cy)
+	loggerWin.BackgroundColor3=Color3.fromRGB(20,18,12)
+	loggerWin.BorderSizePixel=0; loggerWin.Active=true; loggerWin.Draggable=true
+	loggerWin.Visible=true; loggerWin.Parent=gui
+	local lc=Instance.new("UICorner"); lc.CornerRadius=UDim.new(0,4); lc.Parent=loggerWin
+	local ls=Instance.new("UIStroke"); ls.Color=Color3.fromRGB(140,100,40); ls.Thickness=1; ls.Parent=loggerWin
+
+	loggerTitle=Instance.new("TextLabel")
+	loggerTitle.Size=UDim2.new(1,-100,0,20); loggerTitle.Position=UDim2.new(0,10,0,4)
+	loggerTitle.BackgroundTransparency=1; loggerTitle.Text="Enemy Anim Logger   0 Entries"
+	loggerTitle.Font=Enum.Font.GothamBold; loggerTitle.TextSize=11
+	loggerTitle.TextColor3=Color3.fromRGB(230,210,160); loggerTitle.TextXAlignment=Enum.TextXAlignment.Left
+	loggerTitle.Parent=loggerWin
+
+	local clearBtn=Instance.new("TextButton")
+	clearBtn.Size=UDim2.new(0,44,0,16); clearBtn.Position=UDim2.new(1,-70,0,6)
+	clearBtn.BackgroundColor3=Color3.fromRGB(70,60,40); clearBtn.Text="Clear"
+	clearBtn.Font=Enum.Font.Gotham; clearBtn.TextSize=10
+	clearBtn.TextColor3=Color3.fromRGB(230,230,230); clearBtn.BorderSizePixel=0; clearBtn.Parent=loggerWin
+	local lcc=Instance.new("UICorner"); lcc.CornerRadius=UDim.new(0,3); lcc.Parent=clearBtn
+
+	local closeBtn=Instance.new("TextButton")
+	closeBtn.Size=UDim2.new(0,16,0,16); closeBtn.Position=UDim2.new(1,-22,0,6)
+	closeBtn.BackgroundColor3=Color3.fromRGB(70,50,30); closeBtn.Text="X"
+	closeBtn.Font=Enum.Font.GothamBold; closeBtn.TextSize=10
+	closeBtn.TextColor3=Color3.fromRGB(230,230,230); closeBtn.BorderSizePixel=0; closeBtn.Parent=loggerWin
+	local lxc=Instance.new("UICorner"); lxc.CornerRadius=UDim.new(0,3); lxc.Parent=closeBtn
+	closeBtn.MouseButton1Click:Connect(function() loggerWin.Visible=false end)
+
+	local headerRow=Instance.new("Frame")
+	headerRow.Size=UDim2.new(1,-16,0,16); headerRow.Position=UDim2.new(0,8,0,26)
+	headerRow.BackgroundTransparency=1; headerRow.Parent=loggerWin
+	local function headLabel(text,xo,w)
+		local l=Instance.new("TextLabel")
+		l.Size=UDim2.new(0,w,1,0); l.Position=UDim2.new(0,xo,0,0)
+		l.BackgroundTransparency=1; l.Text=text
+		l.Font=Enum.Font.GothamBold; l.TextSize=10
+		l.TextColor3=Color3.fromRGB(220,200,140); l.TextXAlignment=Enum.TextXAlignment.Left
+		l.Parent=headerRow
+		return l
+	end
+	headLabel("Animation",4,110); headLabel("ID",118,100)
+	headLabel("Src",220,60); headLabel("Dist",282,40)
+
+	loggerScroll=Instance.new("ScrollingFrame")
+	loggerScroll.Size=UDim2.new(1,-16,1,-50); loggerScroll.Position=UDim2.new(0,8,0,44)
+	loggerScroll.BackgroundTransparency=1; loggerScroll.BorderSizePixel=0
+	loggerScroll.ScrollBarThickness=4; loggerScroll.CanvasSize=UDim2.new(0,0,0,0)
+	loggerScroll.Parent=loggerWin
+	local loggerLayout=Instance.new("UIListLayout")
+	loggerLayout.Padding=UDim.new(0,3); loggerLayout.Parent=loggerScroll
+	loggerLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		loggerScroll.CanvasSize=UDim2.new(0,0,0,loggerLayout.AbsoluteContentSize.Y+4)
+	end)
+
+	clearBtn.MouseButton1Click:Connect(function()
+		for _,r in ipairs(loggerRows) do if r and r.Parent then r:Destroy() end end
+		loggerRows={}
+		if loggerTitle then loggerTitle.Text="Enemy Anim Logger   0 Entries" end
+	end)
+
+	getgenv().OutlawLogger=loggerWin
+end
+
+local function addLogRow(id,name,source,dist)
+	if not loggerScroll then return end
+	if #loggerRows>=300 then
+		local old=table.remove(loggerRows,1)
+		if old then old:Destroy() end
+	end
+	local row=Instance.new("TextButton")
+	row.Size=UDim2.new(1,-4,0,20)
+	row.BackgroundColor3=Color3.fromRGB(40,35,20); row.Text=""
+	row.AutoButtonColor=false; row.BorderSizePixel=0; row.Parent=loggerScroll
+	local rc=Instance.new("UICorner"); rc.CornerRadius=UDim.new(0,3); rc.Parent=row
+	local function cell(txt,xo,w,color)
+		local l=Instance.new("TextLabel")
+		l.Size=UDim2.new(0,w,1,0); l.Position=UDim2.new(0,xo,0,0)
+		l.BackgroundTransparency=1; l.Text=txt
+		l.Font=Enum.Font.Gotham; l.TextSize=10
+		l.TextColor3=color or Color3.fromRGB(220,220,220)
+		l.TextXAlignment=Enum.TextXAlignment.Left
+		l.TextTruncate=Enum.TextTruncate.AtEnd; l.Parent=row
+		return l
+	end
+	cell(name~="" and name or "Anim",4,110)
+	cell(id,118,100,Color3.fromRGB(180,180,180))
+	cell(source,220,60)
+	cell(tostring(dist or 0),282,40)
+
+	row.MouseButton1Click:Connect(function()
+		if getgenv().OutlawSelectAnim then getgenv().OutlawSelectAnim(id) end
+	end)
+	row.MouseButton2Click:Connect(function()
+		local order={"Block","M1Trade","None"}
+		local cur=responses[id] or "Block"
+		local idx=1
+		for i,v in ipairs(order) do if v==cur then idx=i break end end
+		idx+=1; if idx>#order then idx=1 end
+		responses[id]=order[idx]
+		Airflow:Notify("outlaw.dev",id.." -> "..order[idx],2)
+	end)
+	table.insert(loggerRows,row)
+	if loggerTitle then loggerTitle.Text="Enemy Anim Logger   "..#loggerRows.." Entries" end
+end
+
+task.spawn(function() task.wait(1.5); buildLogger() end)
+
+-- ============================================================
+-- SELF LOGGER
+-- ============================================================
+local selfWin, selfScroll, selfTitle
+local selfRows = {}
+
+local function buildSelfLogger()
+	if getgenv().OutlawSelfLogger then return end
+	local gui=visGui
+	if not gui then
+		gui=Instance.new("ScreenGui")
+		gui.Name="OutlawSelfLoggerOnly"; gui.ResetOnSpawn=false
+		pcall(function() gui.Parent=gethui() end)
+		if not gui.Parent then pcall(function() gui.Parent=game:GetService("CoreGui") end) end
+		if not gui.Parent then gui.Parent=LP:WaitForChild("PlayerGui") end
+	end
+	local screenW=workspace.CurrentCamera.ViewportSize.X
+	local screenH=workspace.CurrentCamera.ViewportSize.Y
+	local winW,winH=340,260
+	local cx=math.floor((screenW-winW)*0.75)
+	local cy=math.floor((screenH-winH)/2)
+
+	selfWin=Instance.new("Frame")
+	selfWin.Name="SelfLogger"
+	selfWin.Size=UDim2.new(0,winW,0,winH)
+	selfWin.Position=UDim2.new(0,cx,0,cy)
+	selfWin.BackgroundColor3=Color3.fromRGB(14,18,22)
+	selfWin.BorderSizePixel=0; selfWin.Active=true; selfWin.Draggable=true
+	selfWin.Visible=true; selfWin.Parent=gui
+	local sc=Instance.new("UICorner"); sc.CornerRadius=UDim.new(0,4); sc.Parent=selfWin
+	local ss=Instance.new("UIStroke"); ss.Color=Color3.fromRGB(60,120,160); ss.Thickness=1; ss.Parent=selfWin
+
+	selfTitle=Instance.new("TextLabel")
+	selfTitle.Size=UDim2.new(1,-100,0,20); selfTitle.Position=UDim2.new(0,10,0,4)
+	selfTitle.BackgroundTransparency=1; selfTitle.Text="Self Anim Logger   0 Entries"
+	selfTitle.Font=Enum.Font.GothamBold; selfTitle.TextSize=11
+	selfTitle.TextColor3=Color3.fromRGB(160,210,240); selfTitle.TextXAlignment=Enum.TextXAlignment.Left
+	selfTitle.Parent=selfWin
+
+	local clearBtn=Instance.new("TextButton")
+	clearBtn.Size=UDim2.new(0,44,0,16); clearBtn.Position=UDim2.new(1,-70,0,6)
+	clearBtn.BackgroundColor3=Color3.fromRGB(40,60,70); clearBtn.Text="Clear"
+	clearBtn.Font=Enum.Font.Gotham; clearBtn.TextSize=10
+	clearBtn.TextColor3=Color3.fromRGB(230,230,230); clearBtn.BorderSizePixel=0; clearBtn.Parent=selfWin
+	local scc=Instance.new("UICorner"); scc.CornerRadius=UDim.new(0,3); scc.Parent=clearBtn
+
+	local closeBtn=Instance.new("TextButton")
+	closeBtn.Size=UDim2.new(0,16,0,16); closeBtn.Position=UDim2.new(1,-22,0,6)
+	closeBtn.BackgroundColor3=Color3.fromRGB(50,30,30); closeBtn.Text="X"
+	closeBtn.Font=Enum.Font.GothamBold; closeBtn.TextSize=10
+	closeBtn.TextColor3=Color3.fromRGB(230,230,230); closeBtn.BorderSizePixel=0; closeBtn.Parent=selfWin
+	local sxc=Instance.new("UICorner"); sxc.CornerRadius=UDim.new(0,3); sxc.Parent=closeBtn
+	closeBtn.MouseButton1Click:Connect(function() selfWin.Visible=false end)
+
+	local headerRow=Instance.new("Frame")
+	headerRow.Size=UDim2.new(1,-16,0,16); headerRow.Position=UDim2.new(0,8,0,26)
+	headerRow.BackgroundTransparency=1; headerRow.Parent=selfWin
+	local function headLabel(text,xo,w)
+		local l=Instance.new("TextLabel")
+		l.Size=UDim2.new(0,w,1,0); l.Position=UDim2.new(0,xo,0,0)
+		l.BackgroundTransparency=1; l.Text=text
+		l.Font=Enum.Font.GothamBold; l.TextSize=10
+		l.TextColor3=Color3.fromRGB(160,210,240); l.TextXAlignment=Enum.TextXAlignment.Left
+		l.Parent=headerRow
+		return l
+	end
+	headLabel("Label",4,90); headLabel("ID",98,160); headLabel("Time",262,70)
+
+	selfScroll=Instance.new("ScrollingFrame")
+	selfScroll.Size=UDim2.new(1,-16,1,-50); selfScroll.Position=UDim2.new(0,8,0,44)
+	selfScroll.BackgroundTransparency=1; selfScroll.BorderSizePixel=0
+	selfScroll.ScrollBarThickness=4; selfScroll.CanvasSize=UDim2.new(0,0,0,0)
+	selfScroll.Parent=selfWin
+	local selfLayout=Instance.new("UIListLayout")
+	selfLayout.Padding=UDim.new(0,3); selfLayout.Parent=selfScroll
+	selfLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		selfScroll.CanvasSize=UDim2.new(0,0,0,selfLayout.AbsoluteContentSize.Y+4)
+	end)
+
+	local function clearRows()
+		for _,r in ipairs(selfRows) do if r and r.Parent then r:Destroy() end end
+		selfRows={}
+		if selfTitle then selfTitle.Text="Self Anim Logger   0 Entries" end
+	end
+	clearBtn.MouseButton1Click:Connect(clearRows)
+	getgenv().OutlawSelfClear=clearRows
+
+	getgenv().OutlawSelfLogger=selfWin
+end
+
+local function addSelfRow(id,label)
+	if not selfScroll then return end
+	if #selfRows>=selfLogMax then
+		local old=table.remove(selfRows,1)
+		if old then old:Destroy() end
+	end
+	local row=Instance.new("TextButton")
+	row.Size=UDim2.new(1,-4,0,20)
+	row.BackgroundColor3=Color3.fromRGB(20,30,40); row.Text=""
+	row.AutoButtonColor=false; row.BorderSizePixel=0; row.Parent=selfScroll
+	local rc=Instance.new("UICorner"); rc.CornerRadius=UDim.new(0,3); rc.Parent=row
+	local function cell(txt,xo,w,color)
+		local l=Instance.new("TextLabel")
+		l.Size=UDim2.new(0,w,1,0); l.Position=UDim2.new(0,xo,0,0)
+		l.BackgroundTransparency=1; l.Text=txt
+		l.Font=Enum.Font.Gotham; l.TextSize=10
+		l.TextColor3=color or Color3.fromRGB(220,220,220)
+		l.TextXAlignment=Enum.TextXAlignment.Left
+		l.TextTruncate=Enum.TextTruncate.AtEnd; l.Parent=row
+		return l
+	end
+	cell(label,4,90); cell(id,98,160,Color3.fromRGB(180,200,220))
+	cell(string.format("%.2f", tick()%1000),262,70,Color3.fromRGB(160,160,160))
+	row.MouseButton1Click:Connect(function()
+		if getgenv().OutlawSelectAnim then getgenv().OutlawSelectAnim(id) end
+	end)
+	table.insert(selfRows,row)
+	if selfTitle then selfTitle.Text="Self Anim Logger   "..#selfRows.." Entries" end
+end
+
+task.spawn(function() task.wait(1.8); buildSelfLogger() end)
+
+-- ============================================================
+-- SELF HOOK (per-character, robust against respawn)
+-- ============================================================
+local selfConnByHum = {}
+
+local function attachSelfAnimator(hum)
+	if not hum or not hum:IsA("Humanoid") then return end
+	if selfLogHooked[hum] then return end
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		task.spawn(function()
+			local t=0
+			while hum.Parent and not animator and t<5 do
+				task.wait(0.1); t+=0.1
+				animator = hum:FindFirstChildOfClass("Animator")
+			end
+			if animator then attachSelfAnimator(hum) end
+		end)
+		return
+	end
+	selfLogHooked[hum]=true
+	local conn = animator.AnimationPlayed:Connect(function(track)
+		if not selfLogOn then return end
+		local anim=track.Animation; if not anim then return end
+		local id=anim.AnimationId
+		if not id or id=="" then return end
+		if selfBlacklist[id] then return end
+		if movementNames[anim.Name] then return end
+		local whitelistOnly=getgenv().OutlawSelfWhitelistOnly
+		local label
+		if whitelistOnly then
+			label=selfWhitelist[id]
+			if not label then return end
+		else
+			label=selfWhitelist[id] or (anim.Name~="" and anim.Name or "custom")
+		end
+		task.spawn(function() addSelfRow(id,label) end)
+	end)
+	selfConnByHum[hum]=conn
+end
+
+function hookSelfLogger()
+	local char = LP.Character
+	if not char then
+		LP.CharacterAdded:Once(function()
+			task.wait(0.75)
+			hookSelfLogger()
+		end)
+		return
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		-- wait for humanoid
+		task.spawn(function()
+			local t=0
+			while char.Parent and not hum and t<5 do
+				task.wait(0.1); t+=0.1
+				hum = char:FindFirstChildOfClass("Humanoid")
+			end
+			if hum then attachSelfAnimator(hum) end
+		end)
+		return
+	end
+	attachSelfAnimator(hum)
+end
+
+function unhookSelfLogger()
+	-- we do not disconnect by default so re-enabling is instant, but drop stale hums
+	for hum, conn in pairs(selfConnByHum) do
+		if not hum.Parent then
+			pcall(function() conn:Disconnect() end)
+			selfConnByHum[hum]=nil
+			selfLogHooked[hum]=nil
+		end
+	end
+end
+
+-- Hard rewire on every respawn: drop old state, reattach after char loads.
+LP.CharacterAdded:Connect(function(newChar)
+	-- clear per-character hook state so we attach fresh
+	for hum, conn in pairs(selfConnByHum) do
+		if hum.Parent ~= newChar then
+			pcall(function() conn:Disconnect() end)
+			selfConnByHum[hum]=nil
+			selfLogHooked[hum]=nil
+		end
+	end
+	-- wait for the Animator to exist on the new character
+	task.spawn(function()
+		local t=0
+		local hum
+		while newChar.Parent and t<8 do
+			task.wait(0.1); t+=0.1
+			hum = newChar:FindFirstChildOfClass("Humanoid")
+			if hum and hum:FindFirstChildOfClass("Animator") then break end
+		end
+		if hum then
+			-- small settle delay so the default idle has already fired and been filtered
+			task.wait(0.4)
+			if selfLogOn then attachSelfAnimator(hum) end
+		end
+	end)
+end)
+
+-- ============================================================
+-- ENEMY HOOK LOGGER
+-- ============================================================
+local function hookLog(hum)
+	if not hum or not hum:IsA("Humanoid") then return end
+	if logHooked[hum] then return end
+	logHooked[hum]=true
+	local animator=hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		task.spawn(function()
+			local t=0
+			while hum.Parent and not animator and t<5 do task.wait(0.1); t+=0.1 end
+			if animator then hookLog(hum) end
+		end); return
+	end
+	local model=hum.Parent
+	animator.AnimationPlayed:Connect(function(track)
+		if not enemyLogOn then return end
+		local anim=track.Animation; if not anim then return end
+		local id=anim.AnimationId
+		if not id or id=="" then return end
+		if skipNames[anim.Name] then return end
+		if id:find("507766") or id:find("507777") or id:find("507797") then return end
+		if model==LP.Character then return end
+		local myRoot=LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+		local theirRoot=model:FindFirstChild("HumanoidRootPart")
+		if not myRoot or not theirRoot then return end
+		local d=(myRoot.Position-theirRoot.Position).Magnitude
+		if d>logRange then return end
+		task.spawn(function() addLogRow(id,anim.Name,model.Name,math.floor(d)) end)
+		if atkIds[id] then
+			if (myRoot.Position-theirRoot.Position).Magnitude<=abRange then
+				task.spawn(function() respondTo(id) end)
+			end
+		end
+	end)
+end
+
+local function hookContainer(container)
+	if not container then return end
+	for _,c in ipairs(container:GetChildren()) do
+		if c:IsA("Model") then
+			local h=c:FindFirstChildOfClass("Humanoid")
+			if h then hookLog(h) end
+		end
+	end
+end
+
+task.spawn(function()
+	hookContainer(workspace:FindFirstChild("Live"))
+	hookContainer(workspace:FindFirstChild("Players"))
+	local live=workspace:FindFirstChild("Live")
+	if live then live.ChildAdded:Connect(function(c)
+		if c:IsA("Model") then
+			local h=c:FindFirstChildOfClass("Humanoid")
+			if h then hookLog(h) end
+		end
+	end) end
+	local p=workspace:FindFirstChild("Players")
+	if p then p.ChildAdded:Connect(function(c)
+		if c:IsA("Model") then
+			local h=c:FindFirstChildOfClass("Humanoid")
+			if h then hookLog(h) end
+		end
+	end) end
+	workspace.DescendantAdded:Connect(function(o)
+		if o:IsA("Humanoid") then hookLog(o) end
+	end)
+end)
+
+startCombatHooks()
+
+Airflow:Notify("outlaw.dev", "Loaded v3. Jump/dodge removed. Rig auto-frames. Self logger survives respawn.", 6)
