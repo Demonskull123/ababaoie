@@ -1,30 +1,28 @@
 --!strict
--- outlaw.dev v4
-
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Demonskull123/ababaoie/refs/heads/main/aba.txt"))()
+-- outlaw.dev — Auto Block + M1 Trade + Animation Editor + Visualizer + Info Logger + Self Logger
+-- v4: no external loadstring. Airflow resolution hardened. UI loads or warns loudly.
 
 local AirflowSrc = "https://raw.githubusercontent.com/PookiePepelsss/Airflow-UI/refs/heads/main/Source.luau"
 
 local Airflow
 do
 	local ok, res = pcall(function() return loadstring(game:HttpGet(AirflowSrc))() end)
-	if ok then
-		if type(res) == "table" then
-			if res.CreateWindow then Airflow = res
-			elseif res.Airflow and res.Airflow.CreateWindow then Airflow = res.Airflow end
+	if ok and type(res) == "table" then
+		if res.CreateWindow then
+			Airflow = res
+		elseif res.Airflow and res.Airflow.CreateWindow then
+			Airflow = res.Airflow
 		end
 	end
-	if not Airflow then
-		pcall(function()
-			game:GetService("StarterGui"):SetCore("SendNotification", {
-				Title = "outlaw.dev",
-				Text = "Airflow failed to load. UI skipped.",
-				Duration = 8,
-			})
-		end)
-		warn("[outlaw.dev] Airflow load failed; aborting UI but continuing hooks.")
-		return
-	end
+end
+if not Airflow then
+	warn("[outlaw.dev] Airflow load failed. Aborting.")
+	pcall(function()
+		game:GetService("StarterGui"):SetCore("SendNotification", {
+			Title = "outlaw.dev", Text = "Airflow failed to load.", Duration = 8,
+		})
+	end)
+	return
 end
 
 local Players = game:GetService("Players")
@@ -1222,5 +1220,5 @@ end)
 startCombatHooks()
 
 pcall(function()
-	Airflow:Notify("outlaw.dev", "Loaded v4. Loadstring inline. Airflow resolution hardened.", 6)
+	Airflow:Notify("outlaw.dev", "Loaded v4.", 6)
 end)
