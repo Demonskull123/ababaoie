@@ -1,5 +1,6 @@
+
 --!strict
--- outlaw.dev — Auto Farm + Auto Block + M1 Trade + Head Ride + Nanami + Yuji + Info Logger + My Logger + Player + Misc
+-- outlaw.dev — Auto Farm + Auto Block + M1 Trade + Head Ride + Nanami + Yuji + Visualizer + Block Builder + Player Block Builder + Player + Misc
 
 local AirflowSrc = "https://raw.githubusercontent.com/PookiePepelsss/Airflow-UI/refs/heads/main/Source.luau"
 
@@ -24,7 +25,7 @@ local LP = Players.LocalPlayer
 
 for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
 	if g then
-		for _, n in ipairs({"OutlawInfoLogger", "OutlawMyLogger", "OutlawVisualizer"}) do
+		for _, n in ipairs({"OutlawBlockBuilder", "OutlawPlayerBlockBuilder", "OutlawVisualizer"}) do
 			local ex = g:FindFirstChild(n)
 			if ex then pcall(function() ex:Destroy() end) end
 		end
@@ -106,14 +107,25 @@ local forcedLock = nil
 local autoRejoin = false
 local rejoinConn = nil
 
--- Logger state
+-- Block Builder state (enemy logger)
 local logRange = 120
 local logHooked = {}
 local loggerWin, loggerScroll, loggerTitle, loggerRows = nil, nil, nil, {}
 
+-- Player Block Builder state (own logger)
 local myLogRange = 120
 local myLogHooked = {}
 local myLoggerWin, myLoggerScroll, myLoggerTitle, myLoggerRows = nil, nil, nil, {}
+
+-- Visualizer state
+local currentId = nil
+local currentTrack = nil
+local currentDuration = 0
+local playbackSpeed = 1
+local paused = false
+local loopPlayback = true
+local previewRig, previewHum, previewWorld, previewViewport, previewCamera
+local visGui, combined
 
 local skipNames = {
 	WalkAnim = true, JumpAnim = true, RunAnim = true, SwimAnim = true,
@@ -815,7 +827,7 @@ LP.CharacterAdded:Connect(function()
 end)
 
 -- =============================================================
--- INFO LOGGER (enemies only)
+-- BLOCK BUILDER (enemy logger)
 -- =============================================================
 local function buildLogger()
 	if getgenv().OutlawLogger and getgenv().OutlawLogger.Parent then return end
@@ -823,14 +835,14 @@ local function buildLogger()
 	local existingGui = nil
 	for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
 		if g then
-			local e = g:FindFirstChild("OutlawInfoLogger")
+			local e = g:FindFirstChild("OutlawBlockBuilder")
 			if e then existingGui = e break end
 		end
 	end
 	if existingGui then pcall(function() existingGui:Destroy() end) end
 
 	local gui = Instance.new("ScreenGui")
-	gui.Name = "OutlawInfoLogger"
+	gui.Name = "OutlawBlockBuilder"
 	gui.ResetOnSpawn = false
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	pcall(function() gui.Parent = gethui() end)
@@ -845,7 +857,7 @@ local function buildLogger()
 	local cy = math.floor((screenH - winH) / 2)
 
 	loggerWin = Instance.new("Frame")
-	loggerWin.Name = "InfoLogger"
+	loggerWin.Name = "BlockBuilder"
 	loggerWin.Size = UDim2.new(0, winW, 0, winH)
 	loggerWin.Position = UDim2.new(0, cx, 0, cy)
 	loggerWin.BackgroundColor3 = Color3.fromRGB(20, 18, 12)
@@ -861,7 +873,7 @@ local function buildLogger()
 	loggerTitle.Size = UDim2.new(1, -100, 0, 22)
 	loggerTitle.Position = UDim2.new(0, 10, 0, 4)
 	loggerTitle.BackgroundTransparency = 1
-	loggerTitle.Text = "Info Logger     0 Entries"
+	loggerTitle.Text = "Block Builder     0 Entries"
 	loggerTitle.Font = Enum.Font.GothamBold
 	loggerTitle.TextSize = 12
 	loggerTitle.TextColor3 = Color3.fromRGB(230, 210, 160)
@@ -939,7 +951,7 @@ local function buildLogger()
 			if r and r.Parent then r:Destroy() end
 		end
 		loggerRows = {}
-		if loggerTitle then loggerTitle.Text = "Info Logger     0 Entries" end
+		if loggerTitle then loggerTitle.Text = "Block Builder     0 Entries" end
 	end)
 
 	getgenv().OutlawLogger = loggerWin
@@ -978,12 +990,12 @@ local function addLogRow(id, name, source, dist)
 
 	table.insert(loggerRows, row)
 	if loggerTitle then
-		loggerTitle.Text = "Info Logger     " .. #loggerRows .. " Entries"
+		loggerTitle.Text = "Block Builder     " .. #loggerRows .. " Entries"
 	end
 end
 
 -- =============================================================
--- MY LOGGER (local player only)
+-- PLAYER BLOCK BUILDER (own logger)
 -- =============================================================
 local function buildMyLogger()
 	if getgenv().OutlawMyLogger and getgenv().OutlawMyLogger.Parent then return end
@@ -991,14 +1003,14 @@ local function buildMyLogger()
 	local existingGui = nil
 	for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
 		if g then
-			local e = g:FindFirstChild("OutlawMyLogger")
+			local e = g:FindFirstChild("OutlawPlayerBlockBuilder")
 			if e then existingGui = e break end
 		end
 	end
 	if existingGui then pcall(function() existingGui:Destroy() end) end
 
 	local gui = Instance.new("ScreenGui")
-	gui.Name = "OutlawMyLogger"
+	gui.Name = "OutlawPlayerBlockBuilder"
 	gui.ResetOnSpawn = false
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	pcall(function() gui.Parent = gethui() end)
@@ -1013,7 +1025,7 @@ local function buildMyLogger()
 	local cy = math.floor((screenH - winH) / 2)
 
 	myLoggerWin = Instance.new("Frame")
-	myLoggerWin.Name = "MyLogger"
+	myLoggerWin.Name = "PlayerBlockBuilder"
 	myLoggerWin.Size = UDim2.new(0, winW, 0, winH)
 	myLoggerWin.Position = UDim2.new(0, cx, 0, cy)
 	myLoggerWin.BackgroundColor3 = Color3.fromRGB(14, 18, 22)
@@ -1029,7 +1041,7 @@ local function buildMyLogger()
 	myLoggerTitle.Size = UDim2.new(1, -100, 0, 22)
 	myLoggerTitle.Position = UDim2.new(0, 10, 0, 4)
 	myLoggerTitle.BackgroundTransparency = 1
-	myLoggerTitle.Text = "My Logger (you)     0 Entries"
+	myLoggerTitle.Text = "Player Block Builder     0 Entries"
 	myLoggerTitle.Font = Enum.Font.GothamBold
 	myLoggerTitle.TextSize = 12
 	myLoggerTitle.TextColor3 = Color3.fromRGB(160, 210, 240)
@@ -1105,7 +1117,7 @@ local function buildMyLogger()
 			if r and r.Parent then r:Destroy() end
 		end
 		myLoggerRows = {}
-		if myLoggerTitle then myLoggerTitle.Text = "My Logger (you)     0 Entries" end
+		if myLoggerTitle then myLoggerTitle.Text = "Player Block Builder     0 Entries" end
 	end)
 
 	getgenv().OutlawMyLogger = myLoggerWin
@@ -1114,7 +1126,7 @@ local function buildMyLogger()
 			if r and r.Parent then r:Destroy() end
 		end
 		myLoggerRows = {}
-		if myLoggerTitle then myLoggerTitle.Text = "My Logger (you)     0 Entries" end
+		if myLoggerTitle then myLoggerTitle.Text = "Player Block Builder     0 Entries" end
 	end
 end
 
@@ -1149,12 +1161,12 @@ local function addMyLogRow(id, name)
 
 	table.insert(myLoggerRows, row)
 	if myLoggerTitle then
-		myLoggerTitle.Text = "My Logger (you)     " .. #myLoggerRows .. " Entries"
+		myLoggerTitle.Text = "Player Block Builder     " .. #myLoggerRows .. " Entries"
 	end
 end
 
 -- =============================================================
--- HOOK LOGGER
+-- LOGGER HOOKS
 -- =============================================================
 local function hookLog(hum)
 	if not hum or not hum:IsA("Humanoid") then return end
@@ -1178,7 +1190,6 @@ local function hookLog(hum)
 		if not anim then return end
 		local id = anim.AnimationId
 		if not id or id == "" then return end
-
 		if model ~= LP.Character then
 			local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
 			local theirRoot = model:FindFirstChild("HumanoidRootPart")
@@ -1250,6 +1261,481 @@ local function hookContainer(container)
 end
 
 -- =============================================================
+-- VISUALIZER BUILD
+-- =============================================================
+local function buildVisualizer()
+	if getgenv().OutlawVisualizer and getgenv().OutlawVisualizer.Parent then
+		combined = getgenv().OutlawVisualizer
+		return
+	end
+
+	local existingGui = nil
+	for _, g in ipairs({gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui")}) do
+		if g then
+			local e = g:FindFirstChild("OutlawVisualizer")
+			if e then existingGui = e break end
+		end
+	end
+	if existingGui then pcall(function() existingGui:Destroy() end) end
+
+	visGui = Instance.new("ScreenGui")
+	visGui.Name = "OutlawVisualizer"
+	visGui.ResetOnSpawn = false
+	visGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	pcall(function() visGui.Parent = gethui() end)
+	if not visGui.Parent then pcall(function() visGui.Parent = game:GetService("CoreGui") end) end
+	if not visGui.Parent then visGui.Parent = LP:WaitForChild("PlayerGui") end
+
+	combined = Instance.new("Frame")
+	combined.Name = "VisualizerWindow"
+	combined.Size = UDim2.new(0, 620, 0, 400)
+	combined.Position = UDim2.new(0.5, -310, 0.5, -200)
+	combined.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+	combined.BorderSizePixel = 0
+	combined.Active = true
+	combined.Draggable = true
+	combined.Visible = true
+	combined.Parent = visGui
+	local wc = Instance.new("UICorner") wc.CornerRadius = UDim.new(0, 4) wc.Parent = combined
+	local ws = Instance.new("UIStroke") ws.Color = Color3.fromRGB(60, 60, 60) ws.Thickness = 1 ws.Parent = combined
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, -20, 0, 20)
+	title.Position = UDim2.new(0, 10, 0, 3)
+	title.BackgroundTransparency = 1
+	title.Text = "Animation Visualizer & Editor"
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 12
+	title.TextColor3 = Color3.fromRGB(230, 230, 230)
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = combined
+
+	local closeX = Instance.new("TextButton")
+	closeX.Size = UDim2.new(0, 20, 0, 18)
+	closeX.Position = UDim2.new(1, -24, 0, 3)
+	closeX.BackgroundTransparency = 1
+	closeX.Text = "X"
+	closeX.Font = Enum.Font.GothamBold
+	closeX.TextSize = 12
+	closeX.TextColor3 = Color3.fromRGB(220, 220, 220)
+	closeX.BorderSizePixel = 0
+	closeX.Parent = combined
+	closeX.MouseButton1Click:Connect(function() combined.Visible = false end)
+
+	previewViewport = Instance.new("ViewportFrame")
+	previewViewport.Size = UDim2.new(0, 400, 0, 270)
+	previewViewport.Position = UDim2.new(0, 10, 0, 26)
+	previewViewport.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	previewViewport.BorderSizePixel = 0
+	previewViewport.Parent = combined
+	local vc = Instance.new("UICorner") vc.CornerRadius = UDim.new(0, 2) vc.Parent = previewViewport
+	local vs = Instance.new("UIStroke") vs.Color = Color3.fromRGB(80, 80, 80) vs.Thickness = 1 vs.Parent = previewViewport
+
+	previewCamera = Instance.new("Camera")
+	previewCamera.CFrame = CFrame.new(Vector3.new(0, 4, -16), Vector3.new(0, 3, 0))
+	previewCamera.FieldOfView = 60
+	previewCamera.Parent = previewViewport
+	previewViewport.CurrentCamera = previewCamera
+
+	previewWorld = Instance.new("WorldModel")
+	previewWorld.Parent = previewViewport
+
+	local plate = Instance.new("Part")
+	plate.Name = "PreviewFloor"
+	plate.Size = Vector3.new(30, 0.2, 30)
+	plate.Position = Vector3.new(0, -0.1, 0)
+	plate.Anchored = true
+	plate.CanCollide = false
+	plate.Color = Color3.fromRGB(60, 60, 60)
+	plate.Material = Enum.Material.SmoothPlastic
+	plate.Parent = previewWorld
+
+	local idBar = Instance.new("TextLabel")
+	idBar.Size = UDim2.new(0, 400, 0, 18)
+	idBar.Position = UDim2.new(0, 10, 0, 300)
+	idBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	idBar.BorderSizePixel = 0
+	idBar.Text = "rbxassetid://0"
+	idBar.Font = Enum.Font.Gotham
+	idBar.TextSize = 11
+	idBar.TextColor3 = Color3.fromRGB(200, 200, 200)
+	idBar.TextXAlignment = Enum.TextXAlignment.Left
+	idBar.Parent = combined
+	local ibr = Instance.new("UICorner") ibr.CornerRadius = UDim.new(0, 2) ibr.Parent = idBar
+	local idPad = Instance.new("UIPadding") idPad.PaddingLeft = UDim.new(0, 6) idPad.Parent = idBar
+
+	local scrubBg = Instance.new("Frame")
+	scrubBg.Size = UDim2.new(0, 400, 0, 12)
+	scrubBg.Position = UDim2.new(0, 10, 0, 322)
+	scrubBg.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	scrubBg.BorderSizePixel = 0
+	scrubBg.Parent = combined
+	local sbc = Instance.new("UICorner") sbc.CornerRadius = UDim.new(0, 3) sbc.Parent = scrubBg
+	local scrubFill = Instance.new("Frame")
+	scrubFill.Size = UDim2.new(0, 0, 1, 0)
+	scrubFill.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+	scrubFill.BorderSizePixel = 0
+	scrubFill.Parent = scrubBg
+	local sfc = Instance.new("UICorner") sfc.CornerRadius = UDim.new(0, 3) sfc.Parent = scrubFill
+
+	local timeLbl = Instance.new("TextLabel")
+	timeLbl.Size = UDim2.new(0, 400, 0, 14)
+	timeLbl.Position = UDim2.new(0, 10, 0, 338)
+	timeLbl.BackgroundTransparency = 1
+	timeLbl.Text = "0.000s / 0.000s"
+	timeLbl.Font = Enum.Font.Gotham
+	timeLbl.TextSize = 10
+	timeLbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+	timeLbl.TextXAlignment = Enum.TextXAlignment.Left
+	timeLbl.Parent = combined
+
+	local ctrlRow = Instance.new("Frame")
+	ctrlRow.Size = UDim2.new(0, 400, 0, 26)
+	ctrlRow.Position = UDim2.new(0, 10, 0, 358)
+	ctrlRow.BackgroundTransparency = 1
+	ctrlRow.Parent = combined
+
+	local function mkBtn(text, xo, w, col)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, w, 0, 24)
+		b.Position = UDim2.new(0, xo, 0, 0)
+		b.BackgroundColor3 = col
+		b.Text = text
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 11
+		b.TextColor3 = Color3.new(1, 1, 1)
+		b.BorderSizePixel = 0
+		b.Parent = ctrlRow
+		local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 3) c.Parent = b
+		return b
+	end
+
+	local btnPlay = mkBtn("Play", 0, 70, Color3.fromRGB(50, 130, 50))
+	local btnPause = mkBtn("Pause", 76, 70, Color3.fromRGB(130, 100, 40))
+	local btnStop = mkBtn("Stop", 152, 70, Color3.fromRGB(140, 50, 50))
+	local btnSpeed = mkBtn("Speed 1x", 228, 80, Color3.fromRGB(60, 60, 90))
+	local btnLoop = mkBtn("Loop ON", 314, 86, Color3.fromRGB(70, 70, 100))
+
+	local qp = Instance.new("Frame")
+	qp.Name = "QuickEditPanel"
+	qp.Size = UDim2.new(0, 190, 0, 370)
+	qp.Position = UDim2.new(1, -200, 0, 26)
+	qp.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	qp.BorderSizePixel = 0
+	qp.Parent = combined
+	local qpc = Instance.new("UICorner") qpc.CornerRadius = UDim.new(0, 4) qpc.Parent = qp
+	local qps = Instance.new("UIStroke") qps.Color = Color3.fromRGB(60, 60, 60) qps.Thickness = 1 qps.Parent = qp
+
+	local qTitle = Instance.new("TextLabel")
+	qTitle.Size = UDim2.new(1, -16, 0, 20)
+	qTitle.Position = UDim2.new(0, 8, 0, 3)
+	qTitle.BackgroundTransparency = 1
+	qTitle.Text = "Quick Edit Timing"
+	qTitle.Font = Enum.Font.GothamBold
+	qTitle.TextSize = 11
+	qTitle.TextColor3 = Color3.fromRGB(230, 230, 230)
+	qTitle.TextXAlignment = Enum.TextXAlignment.Left
+	qTitle.Parent = qp
+
+	local fields = {}
+	local yPos = 26
+	local function addField(name, default)
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, -12, 0, 22)
+		row.Position = UDim2.new(0, 6, 0, yPos)
+		row.BackgroundTransparency = 1
+		row.Parent = qp
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(0, 86, 1, 0)
+		lbl.BackgroundTransparency = 1
+		lbl.Text = name .. ":"
+		lbl.Font = Enum.Font.Gotham
+		lbl.TextSize = 10
+		lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+		lbl.TextXAlignment = Enum.TextXAlignment.Right
+		lbl.Parent = row
+		local box = Instance.new("TextBox")
+		box.Size = UDim2.new(0, 80, 0, 20)
+		box.Position = UDim2.new(1, -80, 0.5, -10)
+		box.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		box.BorderSizePixel = 0
+		box.Text = default or ""
+		box.Font = Enum.Font.Gotham
+		box.TextSize = 10
+		box.TextColor3 = Color3.fromRGB(230, 230, 230)
+		box.ClearTextOnFocus = false
+		box.Parent = row
+		local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 2) bc.Parent = box
+		fields[name] = box
+		yPos += 24
+	end
+
+	addField("Delay (s)", "0.248")
+	addField("Hitbox X", "9")
+	addField("Hitbox Y", "10")
+	addField("Hitbox Z", "10")
+	addField("HSO", "3")
+	addField("Max Dist", "85")
+	addField("Repeat", "1")
+	addField("Rep Delay", "0.35")
+
+	local dodgeRow = Instance.new("Frame")
+	dodgeRow.Size = UDim2.new(1, -12, 0, 22)
+	dodgeRow.Position = UDim2.new(0, 6, 0, yPos)
+	dodgeRow.BackgroundTransparency = 1
+	dodgeRow.Parent = qp
+	local dLbl = Instance.new("TextLabel")
+	dLbl.Size = UDim2.new(0, 86, 1, 0)
+	dLbl.BackgroundTransparency = 1
+	dLbl.Text = "Dodge Dir:"
+	dLbl.Font = Enum.Font.Gotham
+	dLbl.TextSize = 10
+	dLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+	dLbl.TextXAlignment = Enum.TextXAlignment.Right
+	dLbl.Parent = dodgeRow
+	local dBox = Instance.new("TextButton")
+	dBox.Size = UDim2.new(0, 80, 0, 20)
+	dBox.Position = UDim2.new(1, -80, 0.5, -10)
+	dBox.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	dBox.BorderSizePixel = 0
+	dBox.Text = "None"
+	dBox.Font = Enum.Font.Gotham
+	dBox.TextSize = 10
+	dBox.TextColor3 = Color3.fromRGB(230, 230, 230)
+	dBox.Parent = dodgeRow
+	local dbc = Instance.new("UICorner") dbc.CornerRadius = UDim.new(0, 2) dbc.Parent = dBox
+	local dopts = {"None", "Forward", "Backward", "Left", "Right", "Up", "Down"}
+	local didx = 1
+	dBox.MouseButton1Click:Connect(function()
+		didx = didx + 1
+		if didx > #dopts then didx = 1 end
+		dBox.Text = dopts[didx]
+	end)
+	fields["Dodge Dir"] = dBox
+
+	local saveBtn = Instance.new("TextButton")
+	saveBtn.Size = UDim2.new(1, -12, 0, 26)
+	saveBtn.Position = UDim2.new(0, 6, 1, -32)
+	saveBtn.BackgroundColor3 = Color3.fromRGB(230, 230, 230)
+	saveBtn.Text = "Save & Apply"
+	saveBtn.Font = Enum.Font.GothamBold
+	saveBtn.TextSize = 11
+	saveBtn.TextColor3 = Color3.fromRGB(20, 20, 20)
+	saveBtn.BorderSizePixel = 0
+	saveBtn.Parent = qp
+	local svc = Instance.new("UICorner") svc.CornerRadius = UDim.new(0, 3) svc.Parent = saveBtn
+
+	local function buildRig()
+		if not previewWorld or not previewWorld.Parent then return end
+		for _, c in ipairs(previewWorld:GetChildren()) do
+			if c.Name ~= "PreviewFloor" then c:Destroy() end
+		end
+		previewRig, previewHum = nil, nil
+		local char = LP.Character
+		if not char then return end
+		local ok2, clone = pcall(function() return char:Clone() end)
+		if not ok2 or not clone then return end
+		clone.Name = "PreviewRig"
+		for _, d in ipairs(clone:GetDescendants()) do
+			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("Sound") or d:IsA("ParticleEmitter") then
+				d:Destroy()
+			end
+		end
+		clone.Parent = previewWorld
+		local hrp = clone:FindFirstChild("HumanoidRootPart") or clone.PrimaryPart
+		if hrp then
+			hrp.Anchored = false
+			clone:PivotTo(CFrame.new(0, 3, 0))
+			hrp.Anchored = true
+		end
+		if not hrp then
+			local torso = clone:FindFirstChild("Torso")
+			if torso then
+				clone:PivotTo(CFrame.new(0, 3, 0))
+				for _, p in ipairs(clone:GetDescendants()) do
+					if p:IsA("BasePart") then p.Anchored = true end
+				end
+			end
+		end
+		local hum = clone:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			local old = hum:FindFirstChildOfClass("Animator")
+			if old then old:Destroy() end
+			local a = Instance.new("Animator")
+			a.Parent = hum
+			previewHum = hum
+		end
+		previewRig = clone
+	end
+
+	buildRig()
+
+	local pausedTime = 0
+
+	local function stopPlayback()
+		if currentTrack then
+			pcall(function() currentTrack:Stop() end)
+			currentTrack = nil
+		end
+		paused = false
+		scrubFill.Size = UDim2.new(0, 0, 1, 0)
+		timeLbl.Text = "0.000s / 0.000s"
+		btnPause.Text = "Pause"
+	end
+
+	local function playAnim(id)
+		if not previewHum or not previewHum.Parent then buildRig() end
+		if not previewHum then return end
+		stopPlayback()
+		local anim = Instance.new("Animation")
+		anim.AnimationId = id
+		local okA, track = pcall(function() return previewHum:LoadAnimation(anim) end)
+		if not okA or not track then return end
+		track.Looped = loopPlayback
+		track:Play()
+		pcall(function() track:AdjustSpeed(playbackSpeed) end)
+		currentTrack = track
+		currentDuration = track.Length or 0
+		paused = false
+		btnPause.Text = "Pause"
+	end
+
+	local function togglePause()
+		if not currentTrack then return end
+		paused = not paused
+		if paused then
+			pausedTime = currentTrack.TimePosition
+			pcall(function() currentTrack:AdjustSpeed(0) end)
+			pcall(function() currentTrack:Pause() end)
+			btnPause.Text = "Resume"
+		else
+			pcall(function() currentTrack:Play() end)
+			pcall(function() currentTrack.TimePosition = pausedTime end)
+			pcall(function() currentTrack:AdjustSpeed(playbackSpeed) end)
+			btnPause.Text = "Pause"
+		end
+	end
+
+	RunService.RenderStepped:Connect(function()
+		if not currentTrack then return end
+		if paused then
+			pcall(function() currentTrack.TimePosition = pausedTime end)
+		end
+		local t = currentTrack.TimePosition or 0
+		local dur = currentTrack.Length or currentDuration or 0
+		currentDuration = dur
+		local frac = dur > 0 and (t / dur) or 0
+		if frac > 1 then frac = 1 end
+		scrubFill.Size = UDim2.new(frac, 0, 1, 0)
+		timeLbl.Text = string.format("%.3fs / %.3fs", t, dur)
+	end)
+
+	local scrubDragging = false
+	scrubBg.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			scrubDragging = true
+		end
+	end)
+	scrubBg.InputChanged:Connect(function(input)
+		if scrubDragging and currentTrack and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local left = scrubBg.AbsolutePosition.X
+			local width = scrubBg.AbsoluteSize.X
+			if width > 0 then
+				local f = math.clamp((input.Position.X - left) / width, 0, 1)
+				pausedTime = f * (currentTrack.Length or 0)
+				pcall(function() currentTrack.TimePosition = pausedTime end)
+			end
+		end
+	end)
+	scrubBg.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			scrubDragging = false
+		end
+	end)
+
+	btnPlay.MouseButton1Click:Connect(function()
+		if currentId then playAnim(currentId) end
+	end)
+	btnPause.MouseButton1Click:Connect(togglePause)
+	btnStop.MouseButton1Click:Connect(stopPlayback)
+
+	local speeds = {0.1, 0.25, 0.5, 1, 1.5, 2}
+	local sIdx = 4
+	btnSpeed.MouseButton1Click:Connect(function()
+		sIdx = sIdx + 1
+		if sIdx > #speeds then sIdx = 1 end
+		playbackSpeed = speeds[sIdx]
+		btnSpeed.Text = "Speed " .. tostring(playbackSpeed) .. "x"
+		if currentTrack and not paused then
+			pcall(function() currentTrack:AdjustSpeed(playbackSpeed) end)
+		end
+	end)
+
+	btnLoop.MouseButton1Click:Connect(function()
+		loopPlayback = not loopPlayback
+		btnLoop.Text = loopPlayback and "Loop ON" or "Loop OFF"
+		if currentTrack then
+			pcall(function() currentTrack.Looped = loopPlayback end)
+		end
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, gp)
+		if gp then return end
+		if input.KeyCode == Enum.KeyCode.Space then
+			togglePause()
+		end
+	end)
+
+	saveBtn.MouseButton1Click:Connect(function()
+		if not currentId then return end
+		atkIds[currentId] = true
+		timing[currentId] = {
+			delay = tonumber(fields["Delay (s)"].Text) or 0.248,
+			hitboxX = tonumber(fields["Hitbox X"].Text) or 9,
+			hitboxY = tonumber(fields["Hitbox Y"].Text) or 10,
+			hitboxZ = tonumber(fields["Hitbox Z"].Text) or 10,
+			hso = tonumber(fields["HSO"].Text) or 3,
+			maxDist = tonumber(fields["Max Dist"].Text) or 85,
+			repeatN = tonumber(fields["Repeat"].Text) or 1,
+			repDelay = tonumber(fields["Rep Delay"].Text) or 0.35,
+			dodgeDir = fields["Dodge Dir"].Text,
+		}
+		Airflow:Notify("outlaw.dev", "Saved: " .. currentId, 3)
+	end)
+
+	getgenv().OutlawSelectAnim = function(id)
+		currentId = id
+		idBar.Text = id
+		combined.Visible = true
+		playAnim(id)
+		local t = timing[id]
+		if t then
+			fields["Delay (s)"].Text = tostring(t.delay or "0.248")
+			fields["Hitbox X"].Text = tostring(t.hitboxX or "9")
+			fields["Hitbox Y"].Text = tostring(t.hitboxY or "10")
+			fields["Hitbox Z"].Text = tostring(t.hitboxZ or "10")
+			fields["HSO"].Text = tostring(t.hso or "3")
+			fields["Max Dist"].Text = tostring(t.maxDist or "85")
+			fields["Repeat"].Text = tostring(t.repeatN or "1")
+			fields["Rep Delay"].Text = tostring(t.repDelay or "0.35")
+			fields["Dodge Dir"].Text = t.dodgeDir or "None"
+		end
+	end
+
+	LP.CharacterAdded:Connect(function()
+		task.wait(1)
+		buildRig()
+		if currentTrack and not paused then
+			pcall(function() currentTrack:Stop() end)
+			currentTrack = nil
+		end
+	end)
+
+	getgenv().OutlawVisualizer = combined
+end
+
+-- =============================================================
 -- UI
 -- =============================================================
 local Window = Airflow:CreateWindow({
@@ -1267,8 +1753,9 @@ local TradeTab = Window:CreateTab("M1 Trade", "sword")
 local HeadRideTab = Window:CreateTab("Auto Head Ride", "crown")
 local NanamiTab = Window:CreateTab("Auto Nanami", "target")
 local YujiTab = Window:CreateTab("Auto Yuji", "flame")
-local InfoLoggerTab = Window:CreateTab("Info Logger", "scroll")
-local MyLoggerTab = Window:CreateTab("My Logger", "list")
+local BlockBuilderTab = Window:CreateTab("Block Builder", "scroll")
+local MyLoggerTab = Window:CreateTab("Player Block Builder", "list")
+local VisTab = Window:CreateTab("Visualizer", "eye")
 local PlayerTab = Window:CreateTab("Player", "person-standing")
 local MiscTab = Window:CreateTab("Misc", "settings")
 local SettingsTab = Window:CreateTab("Settings", "settings")
@@ -1744,10 +2231,10 @@ YujiTab:CreateButton({
 	end,
 })
 
--- ===== INFO LOGGER TAB =====
-InfoLoggerTab:CreateSection("Info Logger")
-InfoLoggerTab:CreateToggle({
-	Name = "Show Info Logger Window",
+-- ===== BLOCK BUILDER TAB =====
+BlockBuilderTab:CreateSection("Block Builder")
+BlockBuilderTab:CreateToggle({
+	Name = "Show Block Builder Window",
 	Description = "Logs enemy animations in range",
 	CurrentValue = true,
 	Flag = "IL_Show",
@@ -1755,38 +2242,38 @@ InfoLoggerTab:CreateToggle({
 		if getgenv().OutlawLogger then getgenv().OutlawLogger.Visible = v end
 	end,
 })
-InfoLoggerTab:CreateSection("Log Range")
-local ilRangeLbl = InfoLoggerTab:CreateLabel("Range: " .. logRange)
-InfoLoggerTab:CreateButton({
+BlockBuilderTab:CreateSection("Log Range")
+local ilRangeLbl = BlockBuilderTab:CreateLabel("Range: " .. logRange)
+BlockBuilderTab:CreateButton({
 	Name = "Range -20",
 	Callback = function()
 		logRange = math.max(20, logRange - 20)
 		ilRangeLbl:Set("Range: " .. logRange)
 	end,
 })
-InfoLoggerTab:CreateButton({
+BlockBuilderTab:CreateButton({
 	Name = "Range +20",
 	Callback = function()
 		logRange = math.min(500, logRange + 20)
 		ilRangeLbl:Set("Range: " .. logRange)
 	end,
 })
-InfoLoggerTab:CreateSection("Actions")
-InfoLoggerTab:CreateButton({
-	Name = "Clear Info Logger",
+BlockBuilderTab:CreateSection("Actions")
+BlockBuilderTab:CreateButton({
+	Name = "Clear Block Builder",
 	Callback = function()
 		for _, r in ipairs(loggerRows) do
 			if r and r.Parent then r:Destroy() end
 		end
 		loggerRows = {}
-		if loggerTitle then loggerTitle.Text = "Info Logger     0 Entries" end
+		if loggerTitle then loggerTitle.Text = "Block Builder     0 Entries" end
 	end,
 })
 
--- ===== MY LOGGER TAB =====
-MyLoggerTab:CreateSection("My Logger")
+-- ===== PLAYER BLOCK BUILDER TAB =====
+MyLoggerTab:CreateSection("Player Block Builder")
 MyLoggerTab:CreateToggle({
-	Name = "Show My Logger Window",
+	Name = "Show Player Block Builder Window",
 	Description = "Logs only your own animations",
 	CurrentValue = true,
 	Flag = "ML_Show",
@@ -1826,7 +2313,7 @@ MyLoggerTab:CreateButton({
 })
 MyLoggerTab:CreateSection("Actions")
 MyLoggerTab:CreateButton({
-	Name = "Clear My Logger",
+	Name = "Clear Player Block Builder",
 	Callback = function()
 		if getgenv().OutlawMyLoggerClear then getgenv().OutlawMyLoggerClear() end
 	end,
@@ -1834,6 +2321,25 @@ MyLoggerTab:CreateButton({
 
 getgenv().OutlawFilterLoco = true
 getgenv().OutlawIncludeLoco = false
+
+-- ===== VISUALIZER TAB =====
+VisTab:CreateSection("Visualizer")
+VisTab:CreateToggle({
+	Name = "Show Visualizer Window",
+	CurrentValue = true,
+	Flag = "VS_Show",
+	Callback = function(v)
+		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = v end
+	end,
+})
+VisTab:CreateSection("Quick Preview")
+VisTab:CreateButton({
+	Name = "Open Block Builder (no-op if empty)",
+	Callback = function()
+		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = true end
+	end,
+})
+VisTab:CreateLabel("Click any row in Block Builder to preview that anim here.")
 
 -- ===== PLAYER =====
 PlayerTab:CreateSection("Movement")
@@ -1994,6 +2500,9 @@ SettingsTab:CreateButton({
 		if getgenv().OutlawMyLogger and getgenv().OutlawMyLogger.Parent then
 			pcall(function() getgenv().OutlawMyLogger.Parent:Destroy() end)
 		end
+		if getgenv().OutlawVisualizer and getgenv().OutlawVisualizer.Parent then
+			pcall(function() getgenv().OutlawVisualizer.Parent:Destroy() end)
+		end
 	end,
 })
 
@@ -2002,6 +2511,7 @@ task.spawn(function()
 	task.wait(1.2)
 	buildLogger()
 	buildMyLogger()
+	buildVisualizer()
 	hookContainer(workspace:FindFirstChild("Live"))
 	hookContainer(workspace:FindFirstChild("Players"))
 	local live = workspace:FindFirstChild("Live")
@@ -2034,4 +2544,4 @@ end)
 
 startCombatHooks()
 
-Airflow:Notify("outlaw.dev", "Loaded. Farm + Block + Trade + Head Ride + Nanami + Yuji + Loggers.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. Farm + Block + Trade + Head Ride + Nanami + Yuji + Visualizer + Loggers.", 5)
