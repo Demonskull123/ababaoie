@@ -42,10 +42,10 @@ local pingCompMs = 50
 
 local tradeOn = false
 local tradeDelay = 0.04
-local trading = false
-local tradedThisBlock = false
-local tradeStartTime = 0
+local lastTradeAt = 0
+local tradeWindow = 0.05
 local blockEndTimer = nil
+local blockHoldUntil = 0
 
 local headRideOn = false
 local headRideTarget = nil
@@ -269,7 +269,7 @@ local function nearestTarget()
 	local best, bestD = nil, math.huge
 	for hum in pairs(hooked) do
 		local model = hum.Parent
-		if model and model.Parent and model ~= myChar and not isSameTeam(model) then
+		if model and model.Parent and model ~= myChar and not isSameTeam(model) and hum.Health > 0 then
 			local root = model:FindFirstChild("HumanoidRootPart")
 			if root then
 				local d = (myRoot.Position - root.Position).Magnitude
@@ -281,9 +281,13 @@ local function nearestTarget()
 end
 
 local function virtualClick()
-	VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+	local x = math.floor(vp.X * 0.5)
+	local y = math.floor(vp.Y * 0.5)
+	VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
 	task.wait(0.02)
-	VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+	VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
 end
 
 local function fireM1()
@@ -365,7 +369,7 @@ local function startHeadRide(hum)
 		headRideConn:Disconnect()
 		headRideConn = nil
 	end
-	headRideConn = RunService.RenderStepped:Connect(function()
+	headRideConn = RunService.RenderStepped:Connect(function(dt)
 		if not headRideOn then stopHeadRide() return end
 		if tick() >= headRideEndTime then stopHeadRide() return end
 		local model = hum and hum.Parent
@@ -378,7 +382,8 @@ local function startHeadRide(hum)
 		local vel = theirHead.AssemblyLinearVelocity
 		if vel.Y < -60 then stopHeadRide() return end
 		local targetCF = theirHead.CFrame * CFrame.new(0, headRideOffset, 0)
-		myRoot.CFrame = myRoot.CFrame:Lerp(targetCF, headRideAlpha)
+		local alpha = 1 - math.exp(-dt / math.max(headRideAlpha, 1e-4))
+		myRoot.CFrame = myRoot.CFrame:Lerp(targetCF, alpha)
 		myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 	end)
 end
@@ -456,15 +461,24 @@ end
 local function blockPulse(duration)
 	local input = getInput()
 	if not input then return end
+	local now = tick()
+	local newEnd = now + duration
+	if blockEndTimer and blockHoldUntil > now then
+		if newEnd <= blockHoldUntil then
+			return
+		end
+	end
 	if blockEndTimer then
-		pcall(function() blockEndTimer:Cancel() end)
+		pcall(function() task.cancel(blockEndTimer) end)
 		blockEndTimer = nil
 	end
 	pcall(function() input:FireServer("BlockOn") end)
+	blockHoldUntil = newEnd
 	blockEndTimer = task.delay(duration, function()
 		local i = getInput()
 		if i then pcall(function() i:FireServer("BlockOff") end) end
 		blockEndTimer = nil
+		blockHoldUntil = 0
 	end)
 end
 
@@ -478,36 +492,33 @@ local function onAttack(animId)
 	local timing = animId and animTimings[animId] or nil
 	local hasBlockTime = timing and timing.block ~= nil
 	local hasTradeTime = timing and timing.trade ~= nil
+	local ping = pingComp and (pingCompMs / 1000) or 0
 
 	if ABOn then
 		if hasBlockTime then
-			blockPulse(timing.block + (pingComp and (pingCompMs / 1000) or 0))
+			blockPulse(timing.block + ping)
 		else
-			fireBlock()
+			blockPulse(abHold + ping)
 		end
 	end
-	tradedThisBlock = false
+
 	if tradeOn then
-		if trading then
-			if tick() - tradeStartTime > 2 then trading = false else return end
+		local now = tick()
+		if now - lastTradeAt < tradeWindow then
+			return
 		end
-		if tradedThisBlock then return end
-		trading = true
-		tradedThisBlock = true
-		tradeStartTime = tick()
+		lastTradeAt = now
 		task.spawn(function()
 			pcall(function()
 				local waitTime
 				if hasTradeTime then
 					waitTime = timing.trade + tradeDelay
 				else
-					waitTime = (abHold + (pingComp and (pingCompMs / 1000) or 0)) + tradeDelay
+					waitTime = abHold + ping + tradeDelay
 				end
 				task.wait(waitTime)
 				if tradeOn then fireM1() end
 			end)
-			task.wait(0.6)
-			trading = false
 		end)
 	end
 end
@@ -618,6 +629,18 @@ local function hookHumanoid(hum)
 			hooked[hum] = nil
 		end
 	end)
+	hum.ChildAdded:Connect(function(c)
+		if c:IsA("Animator") then
+			hooked[hum] = nil
+			hookHumanoid(hum)
+		end
+	end)
+	hum.ChildRemoved:Connect(function(c)
+		if c:IsA("Animator") then
+			hooked[hum] = nil
+			hookHumanoid(hum)
+		end
+	end)
 end
 
 local function hookLive()
@@ -697,7 +720,14 @@ local function stopHooks()
 	if abConn3 then abConn3:Disconnect() abConn3 = nil end
 end
 
+local cachedBar, cachedBarOwner
 local function findBar()
+	local char = LP.Character
+	if cachedBar and cachedBarOwner == char and cachedBar.Parent then
+		local cut = cachedBar:FindFirstChild("Cutter")
+		local goal = cachedBar:FindFirstChild("Goal")
+		if cut and goal then return cut, goal end
+	end
 	local live = workspace:FindFirstChild("Live")
 	if not live then return nil end
 	for _, c in ipairs(live:GetChildren()) do
@@ -709,11 +739,16 @@ local function findBar()
 				if bar then
 					local cut = bar:FindFirstChild("Cutter")
 					local goal = bar:FindFirstChild("Goal")
-					if cut and goal then return cut, goal end
+					if cut and goal then
+						cachedBar = bar
+						cachedBarOwner = char
+						return cut, goal
+					end
 				end
 			end
 		end
 	end
+	return nil
 end
 
 local function nanamiTick()
@@ -733,7 +768,11 @@ end
 
 local function bindNanamiChar(c)
 	if not c then return end
-	c:GetAttributeChangedSignal("NANAMIAIM"):Connect(function() nanamiFired = false end)
+	c:GetAttributeChangedSignal("NANAMIAIM"):Connect(function()
+		nanamiFired = false
+		cachedBar = nil
+		cachedBarOwner = nil
+	end)
 end
 
 local function yujiTick()
@@ -746,7 +785,7 @@ local function yujiTick()
 		fireSkillByMode()
 		fovFired = true
 	end
-	if fov > fovReset then
+	if fov > fovReset or fov < fovEnter - 5 then
 		fovChanged = false
 		fovFired = false
 	end
@@ -842,8 +881,7 @@ local function doJoinLowest()
 						if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
 							if srv.playing < bestCount then
 								bestCount = srv.playing
-								bestId = srv.id
-							end
+								bestId = srv.id							end
 						end
 					end
 					cursor = data.nextPageCursor or ""
@@ -1902,9 +1940,9 @@ function buildVisualizer()
 
 	UserInputService.InputBegan:Connect(function(input, gp)
 		if gp then return end
-		if input.KeyCode == Enum.KeyCode.Space then
-			togglePause()
-		end
+		if input.KeyCode ~= Enum.KeyCode.Space then return end
+		if not combined or not combined.Visible then return end
+		togglePause()
 	end)
 
 	getgenv().OutlawSelectAnim = function(id)
@@ -1979,6 +2017,7 @@ FarmTab:CreateToggle({
 			if farmSkillLoop then task.cancel(farmSkillLoop) farmSkillLoop = nil end
 			farmTarget = nil
 			forcedLock = nil
+			if not lockOn and lockConn then lockConn:Disconnect() lockConn = nil end
 			if not ABOn and not tradeOn and not headRideOn then stopHooks() end
 		end
 	end,
@@ -2053,7 +2092,7 @@ FarmTab:CreateButton({
 BlockTab:CreateSection("Auto Block")
 BlockTab:CreateToggle({
 	Name = "Auto Block",
-	Description = "Uses per-anim block time if saved, else fallback slider.",
+	Description = "Blocks on every known attack id or anim with saved timings. Never gated by trade.",
 	CurrentValue = false,
 	Flag = "AB_On",
 	Callback = function(v)
@@ -2164,7 +2203,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Uses per-anim trade time if saved, else fallback slider.",
+	Description = "Fires M1 after block window. Never gates the block path.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2181,6 +2220,16 @@ TradeTab:CreateSlider({
 	Flag = "MT_Delay",
 	Callback = function(v) tradeDelay = v end,
 })
+TradeTab:CreateSlider({
+	Name = "Trade Window (s)",
+	Description = "Minimum gap between M1 trade fires. Lower = more trades per second.",
+	Range = {0, 0.5},
+	Increment = 0.005,
+	Suffix = "s",
+	CurrentValue = 0.05,
+	Flag = "MT_Window",
+	Callback = function(v) tradeWindow = v end,
+})
 TradeTab:CreateSection("Manual Test")
 TradeTab:CreateButton({
 	Name = "Test Fire M1",
@@ -2193,8 +2242,7 @@ TradeTab:CreateButton({
 TradeTab:CreateButton({
 	Name = "Test Trade Now",
 	Callback = function()
-		if trading then return Airflow:Notify("outlaw.dev", "Already trading", 2) end
-		tradedThisBlock = false
+		lastTradeAt = 0
 		onAttack(nil)
 		Airflow:Notify("outlaw.dev", "Trade triggered", 3)
 	end,
@@ -2202,9 +2250,7 @@ TradeTab:CreateButton({
 TradeTab:CreateButton({
 	Name = "Force Reset Trade Lock",
 	Callback = function()
-		trading = false
-		tradedThisBlock = false
-		tradeStartTime = 0
+		lastTradeAt = 0
 		Airflow:Notify("outlaw.dev", "Trade lock reset", 2)
 	end,
 })
@@ -2240,7 +2286,7 @@ HeadRideTab:CreateSlider({
 	Callback = function(v) headRideOffset = v end,
 })
 HeadRideTab:CreateSlider({
-	Name = "Smoothness",
+	Name = "Smoothness (time constant)",
 	Range = {0.05, 1},
 	Increment = 0.05,
 	CurrentValue = 0.35,
@@ -2528,7 +2574,6 @@ VisTab:CreateLabel("1. Click a row in either logger.")
 VisTab:CreateLabel("2. Scrub to the frame you want.")
 VisTab:CreateLabel("3. Save Block Time and/or Save Trade Time.")
 VisTab:CreateLabel("Badge shows NEW / SAVED / PARTIAL for the loaded anim.")
-VisTab:CreateLabel("Row dot is green once that anim has a timing.")
 VisTab:CreateSection("Persistence")
 VisTab:CreateLabel("Saved to outlaw_anim_timings.json. Auto-loads on inject.")
 VisTab:CreateLabel("Survives rejoin, server hop, and game switch on the same executor.")
@@ -2777,4 +2822,4 @@ LP.CharacterAdded:Connect(function()
 	if headRideOn then hookMyAnimator() end
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. Per-anim timing + NEW/SAVED indicator.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. AB + MT gate on known ids and saved timings only.", 5)
