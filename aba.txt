@@ -123,9 +123,9 @@ local loopPlayback = true
 local previewRig, previewHum, previewWorld, previewViewport, previewCamera
 local visGui, combined
 
--- animTimings[id] = { block = seconds, trade = seconds }
 local animTimings = {}
 local timingFile = "outlaw_anim_timings.json"
+local timingRowDots = {}
 
 local pendingSelectAnim = nil
 local buildVisualizer
@@ -140,6 +140,18 @@ end
 
 local function saveAnimTimings()
 	pcall(function() writefile(timingFile, HttpService:JSONEncode(animTimings)) end)
+end
+
+local function refreshRowDots()
+	for id, dot in pairs(timingRowDots) do
+		if dot and dot.Parent then
+			if animTimings[id] then
+				dot.BackgroundColor3 = Color3.fromRGB(80, 220, 120)
+			else
+				dot.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+			end
+		end
+	end
 end
 
 local skipNames = {
@@ -461,12 +473,9 @@ local function fireBlock()
 	blockPulse(holdTime)
 end
 
--- onAttack(id): per-anim block time + per-anim trade time; fallback to slider defaults
 local function onAttack(animId)
 	if not ABOn and not tradeOn then return end
 	local timing = animId and animTimings[animId] or nil
-	local blockTime = (timing and timing.block) or (abHold + (pingComp and (pingCompMs / 1000) or 0))
-	local tradeTime = (timing and timing.trade) or (abHold + (pingComp and (pingCompMs / 1000) or 0) + tradeDelay)
 	local hasBlockTime = timing and timing.block ~= nil
 	local hasTradeTime = timing and timing.trade ~= nil
 
@@ -999,10 +1008,11 @@ local function buildLogger()
 		return l
 	end
 
-	headLabel("Animation", 8, 140)
-	headLabel("ID", 155, 150)
-	headLabel("Enemy", 305, 70)
-	headLabel("Dist", 375, 50)
+	headLabel("T", 2, 14)
+	headLabel("Animation", 20, 132)
+	headLabel("ID", 158, 146)
+	headLabel("Enemy", 306, 66)
+	headLabel("Dist", 374, 50)
 
 	loggerScroll = Instance.new("ScrollingFrame")
 	loggerScroll.Size = UDim2.new(1, -16, 1, -54)
@@ -1043,6 +1053,15 @@ local function addLogRow(id, name, source, dist)
 	row.Parent = loggerScroll
 	local rc = Instance.new("UICorner") rc.CornerRadius = UDim.new(0, 3) rc.Parent = row
 
+	local dot = Instance.new("Frame")
+	dot.Size = UDim2.new(0, 8, 0, 8)
+	dot.Position = UDim2.new(0, 4, 0.5, -4)
+	dot.BackgroundColor3 = animTimings[id] and Color3.fromRGB(80, 220, 120) or Color3.fromRGB(70, 70, 70)
+	dot.BorderSizePixel = 0
+	dot.Parent = row
+	local dc = Instance.new("UICorner") dc.CornerRadius = UDim.new(1, 0) dc.Parent = dot
+	timingRowDots[id] = dot
+
 	local function cell(txt, xo, w, color)
 		local l = Instance.new("TextLabel")
 		l.Size = UDim2.new(0, w, 1, 0)
@@ -1058,10 +1077,10 @@ local function addLogRow(id, name, source, dist)
 		return l
 	end
 
-	cell(name ~= "" and name or "Anim", 8, 140)
-	cell(id, 155, 150, Color3.fromRGB(180, 180, 180))
-	cell(source, 305, 70)
-	cell(tostring(dist or 0), 375, 50)
+	cell(name ~= "" and name or "Anim", 20, 132)
+	cell(id, 158, 146, Color3.fromRGB(180, 180, 180))
+	cell(source, 306, 66)
+	cell(tostring(dist or 0), 374, 50)
 
 	row.MouseButton1Click:Connect(function()
 		selectAnim(id)
@@ -1194,8 +1213,9 @@ local function buildMyLogger()
 		return l
 	end
 
-	headLabel("Animation", 8, 160)
-	headLabel("ID", 170, 220)
+	headLabel("T", 2, 14)
+	headLabel("Animation", 20, 150)
+	headLabel("ID", 172, 218)
 
 	myLoggerScroll = Instance.new("ScrollingFrame")
 	myLoggerScroll.Size = UDim2.new(1, -16, 1, -54)
@@ -1243,6 +1263,15 @@ local function addMyLogRow(id, name)
 	row.Parent = myLoggerScroll
 	local rc = Instance.new("UICorner") rc.CornerRadius = UDim.new(0, 3) rc.Parent = row
 
+	local dot = Instance.new("Frame")
+	dot.Size = UDim2.new(0, 8, 0, 8)
+	dot.Position = UDim2.new(0, 4, 0.5, -4)
+	dot.BackgroundColor3 = animTimings[id] and Color3.fromRGB(80, 220, 120) or Color3.fromRGB(70, 70, 70)
+	dot.BorderSizePixel = 0
+	dot.Parent = row
+	local dc = Instance.new("UICorner") dc.CornerRadius = UDim.new(1, 0) dc.Parent = dot
+	timingRowDots[id] = dot
+
 	local function cell(txt, xo, w, color)
 		local l = Instance.new("TextLabel")
 		l.Size = UDim2.new(0, w, 1, 0)
@@ -1258,8 +1287,8 @@ local function addMyLogRow(id, name)
 		return l
 	end
 
-	cell(name ~= "" and name or "Anim", 8, 160)
-	cell(id, 170, 220, Color3.fromRGB(180, 200, 215))
+	cell(name ~= "" and name or "Anim", 20, 150)
+	cell(id, 172, 218, Color3.fromRGB(180, 200, 215))
 
 	row.MouseButton1Click:Connect(function()
 		selectAnim(id)
@@ -1391,8 +1420,8 @@ function buildVisualizer()
 
 	combined = Instance.new("Frame")
 	combined.Name = "VisualizerWindow"
-	combined.Size = UDim2.new(0, 620, 0, 430)
-	combined.Position = UDim2.new(0.5, -310, 0.5, -215)
+	combined.Size = UDim2.new(0, 620, 0, 460)
+	combined.Position = UDim2.new(0.5, -310, 0.5, -230)
 	combined.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
 	combined.BorderSizePixel = 0
 	combined.Active = true
@@ -1454,7 +1483,7 @@ function buildVisualizer()
 	plate.Parent = previewWorld
 
 	local idBar = Instance.new("TextLabel")
-	idBar.Size = UDim2.new(0, 600, 0, 18)
+	idBar.Size = UDim2.new(0, 470, 0, 18)
 	idBar.Position = UDim2.new(0, 10, 0, 310)
 	idBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 	idBar.BorderSizePixel = 0
@@ -1466,6 +1495,18 @@ function buildVisualizer()
 	idBar.Parent = combined
 	local ibr = Instance.new("UICorner") ibr.CornerRadius = UDim.new(0, 2) ibr.Parent = idBar
 	local idPad = Instance.new("UIPadding") idPad.PaddingLeft = UDim.new(0, 6) idPad.Parent = idBar
+
+	local statusBadge = Instance.new("TextLabel")
+	statusBadge.Size = UDim2.new(0, 120, 0, 18)
+	statusBadge.Position = UDim2.new(0, 490, 0, 310)
+	statusBadge.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	statusBadge.BorderSizePixel = 0
+	statusBadge.Text = "NEW"
+	statusBadge.Font = Enum.Font.GothamBold
+	statusBadge.TextSize = 11
+	statusBadge.TextColor3 = Color3.fromRGB(255, 255, 255)
+	statusBadge.Parent = combined
+	local sbc2 = Instance.new("UICorner") sbc2.CornerRadius = UDim.new(0, 2) sbc2.Parent = statusBadge
 
 	local scrubBg = Instance.new("Frame")
 	scrubBg.Size = UDim2.new(0, 600, 0, 14)
@@ -1511,7 +1552,7 @@ function buildVisualizer()
 	timeLbl.TextXAlignment = Enum.TextXAlignment.Left
 	timeLbl.Parent = combined
 
-	timingStatusLabel = Instance.new("TextLabel")
+	local timingStatusLabel = Instance.new("TextLabel")
 	timingStatusLabel.Size = UDim2.new(0, 300, 0, 14)
 	timingStatusLabel.Position = UDim2.new(0, 310, 0, 350)
 	timingStatusLabel.BackgroundTransparency = 1
@@ -1577,11 +1618,31 @@ function buildVisualizer()
 	local btnClearAnim = mkSmallBtn("Clear Both (this anim)", 256, 180, Color3.fromRGB(70, 40, 40))
 	local btnClearAll = mkSmallBtn("Clear All Timings", 444, 156, Color3.fromRGB(120, 30, 30))
 
+	local function refreshBadge()
+		if not currentId then
+			statusBadge.Text = "NONE"
+			statusBadge.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+			return
+		end
+		local t = animTimings[currentId]
+		if not t then
+			statusBadge.Text = "NEW"
+			statusBadge.BackgroundColor3 = Color3.fromRGB(200, 120, 40)
+		elseif t.block and t.trade then
+			statusBadge.Text = "SAVED"
+			statusBadge.BackgroundColor3 = Color3.fromRGB(40, 140, 60)
+		else
+			statusBadge.Text = "PARTIAL"
+			statusBadge.BackgroundColor3 = Color3.fromRGB(180, 160, 30)
+		end
+	end
+
 	local function refreshTimingUI()
 		if not currentId then
 			blockMarker.Visible = false
 			tradeMarker.Visible = false
 			timingStatusLabel.Text = "block: -- | trade: --"
+			refreshBadge()
 			return
 		end
 		local t = animTimings[currentId]
@@ -1601,6 +1662,14 @@ function buildVisualizer()
 		local bs = t and t.block and string.format("%.3fs", t.block) or "--"
 		local ts = t and t.trade and string.format("%.3fs", t.trade) or "--"
 		timingStatusLabel.Text = "block: " .. bs .. " | trade: " .. ts
+		refreshBadge()
+	end
+
+	local function flashButton(btn, origColor)
+		btn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		task.delay(0.15, function()
+			if btn and btn.Parent then btn.BackgroundColor3 = origColor end
+		end)
 	end
 
 	local function buildRig()
@@ -1708,17 +1777,6 @@ function buildVisualizer()
 		if frac > 1 then frac = 1 end
 		scrubFill.Size = UDim2.new(frac, 0, 1, 0)
 		timeLbl.Text = string.format("%.3fs / %.3fs", t, dur)
-		if currentId and animTimings[currentId] then
-			local tm = animTimings[currentId]
-			if tm.block and dur > 0 then
-				blockMarker.Visible = true
-				blockMarker.Position = UDim2.new(tm.block / dur, 0, 0, -3)
-			end
-			if tm.trade and dur > 0 then
-				tradeMarker.Visible = true
-				tradeMarker.Position = UDim2.new(tm.trade / dur, 0, 0, -3)
-			end
-		end
 	end)
 
 	local scrubDragging = false
@@ -1787,6 +1845,8 @@ function buildVisualizer()
 		animTimings[currentId].block = t
 		saveAnimTimings()
 		refreshTimingUI()
+		refreshRowDots()
+		flashButton(btnSaveBlock, Color3.fromRGB(40, 130, 70))
 		if Airflow and Airflow.Notify then
 			Airflow:Notify("outlaw.dev", string.format("Block time %.3fs saved for %s", t, currentId), 3)
 		end
@@ -1800,6 +1860,8 @@ function buildVisualizer()
 		animTimings[currentId].trade = t
 		saveAnimTimings()
 		refreshTimingUI()
+		refreshRowDots()
+		flashButton(btnSaveTrade, Color3.fromRGB(150, 80, 40))
 		if Airflow and Airflow.Notify then
 			Airflow:Notify("outlaw.dev", string.format("Trade time %.3fs saved for %s", t, currentId), 3)
 		end
@@ -1808,15 +1870,19 @@ function buildVisualizer()
 	btnClearBlock.MouseButton1Click:Connect(function()
 		if currentId and animTimings[currentId] then
 			animTimings[currentId].block = nil
+			if not next(animTimings[currentId]) then animTimings[currentId] = nil end
 			saveAnimTimings()
 			refreshTimingUI()
+			refreshRowDots()
 		end
 	end)
 	btnClearTrade.MouseButton1Click:Connect(function()
 		if currentId and animTimings[currentId] then
 			animTimings[currentId].trade = nil
+			if not next(animTimings[currentId]) then animTimings[currentId] = nil end
 			saveAnimTimings()
 			refreshTimingUI()
+			refreshRowDots()
 		end
 	end)
 	btnClearAnim.MouseButton1Click:Connect(function()
@@ -1824,12 +1890,14 @@ function buildVisualizer()
 			animTimings[currentId] = nil
 			saveAnimTimings()
 			refreshTimingUI()
+			refreshRowDots()
 		end
 	end)
 	btnClearAll.MouseButton1Click:Connect(function()
 		animTimings = {}
 		saveAnimTimings()
 		refreshTimingUI()
+		refreshRowDots()
 	end)
 
 	UserInputService.InputBegan:Connect(function(input, gp)
@@ -1985,7 +2053,7 @@ FarmTab:CreateButton({
 BlockTab:CreateSection("Auto Block")
 BlockTab:CreateToggle({
 	Name = "Auto Block",
-	Description = "Blocks on attack anim. Uses per-anim block time if saved, else slider default.",
+	Description = "Uses per-anim block time if saved, else fallback slider.",
 	CurrentValue = false,
 	Flag = "AB_On",
 	Callback = function(v)
@@ -2096,7 +2164,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Blocks then fires M1. Uses per-anim trade time if saved, else slider default.",
+	Description = "Uses per-anim trade time if saved, else fallback slider.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2389,6 +2457,7 @@ BlockBuilderTab:CreateButton({
 		if loggerTitle then loggerTitle.Text = "Block Builder     0 Entries" end
 	end,
 })
+BlockBuilderTab:CreateLabel("Green dot = timing saved. Grey dot = new.")
 
 -- ===== PLAYER BLOCK BUILDER TAB =====
 MyLoggerTab:CreateSection("Player Block Builder")
@@ -2439,6 +2508,7 @@ MyLoggerTab:CreateButton({
 		if getgenv().OutlawMyLoggerClear then getgenv().OutlawMyLoggerClear() end
 	end,
 })
+MyLoggerTab:CreateLabel("Green dot = timing saved. Grey dot = new.")
 
 getgenv().OutlawFilterLoco = true
 getgenv().OutlawIncludeLoco = false
@@ -2455,17 +2525,19 @@ VisTab:CreateToggle({
 })
 VisTab:CreateSection("How to save per-anim timing")
 VisTab:CreateLabel("1. Click a row in either logger.")
-VisTab:CreateLabel("2. Scrub to the frame you want (green = block, orange = trade).")
-VisTab:CreateLabel("3. Click Save Block Time or Save Trade Time.")
-VisTab:CreateLabel("4. Turn on Auto Block and/or M1 Trade.")
-VisTab:CreateLabel("Each animation id stores its own block and trade times.")
+VisTab:CreateLabel("2. Scrub to the frame you want.")
+VisTab:CreateLabel("3. Save Block Time and/or Save Trade Time.")
+VisTab:CreateLabel("Badge shows NEW / SAVED / PARTIAL for the loaded anim.")
+VisTab:CreateLabel("Row dot is green once that anim has a timing.")
 VisTab:CreateSection("Persistence")
 VisTab:CreateLabel("Saved to outlaw_anim_timings.json. Auto-loads on inject.")
+VisTab:CreateLabel("Survives rejoin, server hop, and game switch on the same executor.")
 VisTab:CreateButton({
 	Name = "Clear ALL Saved Timings",
 	Callback = function()
 		animTimings = {}
 		saveAnimTimings()
+		refreshRowDots()
 		if Airflow then Airflow:Notify("outlaw.dev", "All anim timings cleared", 3) end
 	end,
 })
@@ -2705,4 +2777,4 @@ LP.CharacterAdded:Connect(function()
 	if headRideOn then hookMyAnimator() end
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. Per-anim timing wired into Auto Block and M1 Trade.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. Per-anim timing + NEW/SAVED indicator.", 5)
