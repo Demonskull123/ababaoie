@@ -123,8 +123,24 @@ local loopPlayback = true
 local previewRig, previewHum, previewWorld, previewViewport, previewCamera
 local visGui, combined
 
+-- animTimings[id] = { block = seconds, trade = seconds }
+local animTimings = {}
+local timingFile = "outlaw_anim_timings.json"
+
 local pendingSelectAnim = nil
 local buildVisualizer
+
+local function loadAnimTimings()
+	local ok2, data = pcall(function() return readfile(timingFile) end)
+	if ok2 and data and data ~= "" then
+		local ok3, decoded = pcall(function() return HttpService:JSONDecode(data) end)
+		if ok3 and type(decoded) == "table" then animTimings = decoded end
+	end
+end
+
+local function saveAnimTimings()
+	pcall(function() writefile(timingFile, HttpService:JSONEncode(animTimings)) end)
+end
 
 local skipNames = {
 	WalkAnim = true, JumpAnim = true, RunAnim = true, SwimAnim = true,
@@ -445,31 +461,46 @@ local function fireBlock()
 	blockPulse(holdTime)
 end
 
-local function doTrade()
-	if not tradeOn then return end
-	if trading then
-		if tick() - tradeStartTime > 2 then trading = false else return end
-	end
-	if tradedThisBlock then return end
-	trading = true
-	tradedThisBlock = true
-	tradeStartTime = tick()
-	task.spawn(function()
-		pcall(function()
-			local holdTime = abHold + (pingComp and (pingCompMs / 1000) or 0)
-			task.wait(holdTime + tradeDelay)
-			if tradeOn then fireM1() end
-		end)
-		task.wait(0.6)
-		trading = false
-	end)
-end
-
-local function onAttack()
+-- onAttack(id): per-anim block time + per-anim trade time; fallback to slider defaults
+local function onAttack(animId)
 	if not ABOn and not tradeOn then return end
-	fireBlock()
+	local timing = animId and animTimings[animId] or nil
+	local blockTime = (timing and timing.block) or (abHold + (pingComp and (pingCompMs / 1000) or 0))
+	local tradeTime = (timing and timing.trade) or (abHold + (pingComp and (pingCompMs / 1000) or 0) + tradeDelay)
+	local hasBlockTime = timing and timing.block ~= nil
+	local hasTradeTime = timing and timing.trade ~= nil
+
+	if ABOn then
+		if hasBlockTime then
+			blockPulse(timing.block + (pingComp and (pingCompMs / 1000) or 0))
+		else
+			fireBlock()
+		end
+	end
 	tradedThisBlock = false
-	if tradeOn then doTrade() end
+	if tradeOn then
+		if trading then
+			if tick() - tradeStartTime > 2 then trading = false else return end
+		end
+		if tradedThisBlock then return end
+		trading = true
+		tradedThisBlock = true
+		tradeStartTime = tick()
+		task.spawn(function()
+			pcall(function()
+				local waitTime
+				if hasTradeTime then
+					waitTime = timing.trade + tradeDelay
+				else
+					waitTime = (abHold + (pingComp and (pingCompMs / 1000) or 0)) + tradeDelay
+				end
+				task.wait(waitTime)
+				if tradeOn then fireM1() end
+			end)
+			task.wait(0.6)
+			trading = false
+		end)
+	end
 end
 
 local function farmPositionCFrame(targetRoot)
@@ -566,9 +597,9 @@ local function hookHumanoid(hum)
 		if not myRoot or not theirRoot then return end
 		if (myRoot.Position - theirRoot.Position).Magnitude > abRange then return end
 		if comboEndIds[id] then return end
-		if not atkIds[id] then return end
+		if not atkIds[id] and not animTimings[id] then return end
 		if not ABOn and not tradeOn then return end
-		onAttack()
+		onAttack(id)
 	end)
 	local cleanup
 	cleanup = hum.AncestryChanged:Connect(function(_, parent)
@@ -1360,8 +1391,8 @@ function buildVisualizer()
 
 	combined = Instance.new("Frame")
 	combined.Name = "VisualizerWindow"
-	combined.Size = UDim2.new(0, 620, 0, 400)
-	combined.Position = UDim2.new(0.5, -310, 0.5, -200)
+	combined.Size = UDim2.new(0, 620, 0, 430)
+	combined.Position = UDim2.new(0.5, -310, 0.5, -215)
 	combined.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
 	combined.BorderSizePixel = 0
 	combined.Active = true
@@ -1375,7 +1406,7 @@ function buildVisualizer()
 	title.Size = UDim2.new(1, -20, 0, 20)
 	title.Position = UDim2.new(0, 10, 0, 3)
 	title.BackgroundTransparency = 1
-	title.Text = "Animation Visualizer & Editor"
+	title.Text = "Animation Visualizer — per-anim timing"
 	title.Font = Enum.Font.GothamBold
 	title.TextSize = 12
 	title.TextColor3 = Color3.fromRGB(230, 230, 230)
@@ -1395,7 +1426,7 @@ function buildVisualizer()
 	closeX.MouseButton1Click:Connect(function() combined.Visible = false end)
 
 	previewViewport = Instance.new("ViewportFrame")
-	previewViewport.Size = UDim2.new(0, 400, 0, 270)
+	previewViewport.Size = UDim2.new(0, 600, 0, 280)
 	previewViewport.Position = UDim2.new(0, 10, 0, 26)
 	previewViewport.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 	previewViewport.BorderSizePixel = 0
@@ -1423,8 +1454,8 @@ function buildVisualizer()
 	plate.Parent = previewWorld
 
 	local idBar = Instance.new("TextLabel")
-	idBar.Size = UDim2.new(0, 400, 0, 18)
-	idBar.Position = UDim2.new(0, 10, 0, 300)
+	idBar.Size = UDim2.new(0, 600, 0, 18)
+	idBar.Position = UDim2.new(0, 10, 0, 310)
 	idBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 	idBar.BorderSizePixel = 0
 	idBar.Text = "rbxassetid://0"
@@ -1437,12 +1468,13 @@ function buildVisualizer()
 	local idPad = Instance.new("UIPadding") idPad.PaddingLeft = UDim.new(0, 6) idPad.Parent = idBar
 
 	local scrubBg = Instance.new("Frame")
-	scrubBg.Size = UDim2.new(0, 400, 0, 12)
-	scrubBg.Position = UDim2.new(0, 10, 0, 322)
+	scrubBg.Size = UDim2.new(0, 600, 0, 14)
+	scrubBg.Position = UDim2.new(0, 10, 0, 332)
 	scrubBg.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
 	scrubBg.BorderSizePixel = 0
 	scrubBg.Parent = combined
 	local sbc = Instance.new("UICorner") sbc.CornerRadius = UDim.new(0, 3) sbc.Parent = scrubBg
+
 	local scrubFill = Instance.new("Frame")
 	scrubFill.Size = UDim2.new(0, 0, 1, 0)
 	scrubFill.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
@@ -1450,9 +1482,27 @@ function buildVisualizer()
 	scrubFill.Parent = scrubBg
 	local sfc = Instance.new("UICorner") sfc.CornerRadius = UDim.new(0, 3) sfc.Parent = scrubFill
 
+	local blockMarker = Instance.new("Frame")
+	blockMarker.Size = UDim2.new(0, 3, 1, 6)
+	blockMarker.Position = UDim2.new(0, -100, 0, -3)
+	blockMarker.BackgroundColor3 = Color3.fromRGB(80, 220, 120)
+	blockMarker.BorderSizePixel = 0
+	blockMarker.ZIndex = 3
+	blockMarker.Visible = false
+	blockMarker.Parent = scrubBg
+
+	local tradeMarker = Instance.new("Frame")
+	tradeMarker.Size = UDim2.new(0, 3, 1, 6)
+	tradeMarker.Position = UDim2.new(0, -100, 0, -3)
+	tradeMarker.BackgroundColor3 = Color3.fromRGB(220, 130, 60)
+	tradeMarker.BorderSizePixel = 0
+	tradeMarker.ZIndex = 3
+	tradeMarker.Visible = false
+	tradeMarker.Parent = scrubBg
+
 	local timeLbl = Instance.new("TextLabel")
-	timeLbl.Size = UDim2.new(0, 400, 0, 14)
-	timeLbl.Position = UDim2.new(0, 10, 0, 338)
+	timeLbl.Size = UDim2.new(0, 300, 0, 14)
+	timeLbl.Position = UDim2.new(0, 10, 0, 350)
 	timeLbl.BackgroundTransparency = 1
 	timeLbl.Text = "0.000s / 0.000s"
 	timeLbl.Font = Enum.Font.Gotham
@@ -1461,9 +1511,20 @@ function buildVisualizer()
 	timeLbl.TextXAlignment = Enum.TextXAlignment.Left
 	timeLbl.Parent = combined
 
+	timingStatusLabel = Instance.new("TextLabel")
+	timingStatusLabel.Size = UDim2.new(0, 300, 0, 14)
+	timingStatusLabel.Position = UDim2.new(0, 310, 0, 350)
+	timingStatusLabel.BackgroundTransparency = 1
+	timingStatusLabel.Text = "block: -- | trade: --"
+	timingStatusLabel.Font = Enum.Font.Gotham
+	timingStatusLabel.TextSize = 10
+	timingStatusLabel.TextColor3 = Color3.fromRGB(180, 220, 180)
+	timingStatusLabel.TextXAlignment = Enum.TextXAlignment.Right
+	timingStatusLabel.Parent = combined
+
 	local ctrlRow = Instance.new("Frame")
-	ctrlRow.Size = UDim2.new(0, 400, 0, 26)
-	ctrlRow.Position = UDim2.new(0, 10, 0, 358)
+	ctrlRow.Size = UDim2.new(0, 600, 0, 26)
+	ctrlRow.Position = UDim2.new(0, 10, 0, 366)
 	ctrlRow.BackgroundTransparency = 1
 	ctrlRow.Parent = combined
 
@@ -1482,120 +1543,65 @@ function buildVisualizer()
 		return b
 	end
 
-	local btnPlay = mkBtn("Play", 0, 70, Color3.fromRGB(50, 130, 50))
-	local btnPause = mkBtn("Pause", 76, 70, Color3.fromRGB(130, 100, 40))
-	local btnStop = mkBtn("Stop", 152, 70, Color3.fromRGB(140, 50, 50))
-	local btnSpeed = mkBtn("Speed 1x", 228, 80, Color3.fromRGB(60, 60, 90))
-	local btnLoop = mkBtn("Loop ON", 314, 86, Color3.fromRGB(70, 70, 100))
+	local btnPlay = mkBtn("Play", 0, 60, Color3.fromRGB(50, 130, 50))
+	local btnPause = mkBtn("Pause", 64, 60, Color3.fromRGB(130, 100, 40))
+	local btnStop = mkBtn("Stop", 128, 60, Color3.fromRGB(140, 50, 50))
+	local btnSpeed = mkBtn("Speed 1x", 192, 76, Color3.fromRGB(60, 60, 90))
+	local btnLoop = mkBtn("Loop ON", 272, 76, Color3.fromRGB(70, 70, 100))
+	local btnSaveBlock = mkBtn("Save Block Time", 352, 120, Color3.fromRGB(40, 130, 70))
+	local btnSaveTrade = mkBtn("Save Trade Time", 476, 120, Color3.fromRGB(150, 80, 40))
 
-	local qp = Instance.new("Frame")
-	qp.Name = "QuickEditPanel"
-	qp.Size = UDim2.new(0, 190, 0, 370)
-	qp.Position = UDim2.new(1, -200, 0, 26)
-	qp.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	qp.BorderSizePixel = 0
-	qp.Parent = combined
-	local qpc = Instance.new("UICorner") qpc.CornerRadius = UDim.new(0, 4) qpc.Parent = qp
-	local qps = Instance.new("UIStroke") qps.Color = Color3.fromRGB(60, 60, 60) qps.Thickness = 1 qps.Parent = qp
+	local editRow = Instance.new("Frame")
+	editRow.Size = UDim2.new(0, 600, 0, 24)
+	editRow.Position = UDim2.new(0, 10, 0, 396)
+	editRow.BackgroundTransparency = 1
+	editRow.Parent = combined
 
-	local qTitle = Instance.new("TextLabel")
-	qTitle.Size = UDim2.new(1, -16, 0, 20)
-	qTitle.Position = UDim2.new(0, 8, 0, 3)
-	qTitle.BackgroundTransparency = 1
-	qTitle.Text = "Quick Edit Timing"
-	qTitle.Font = Enum.Font.GothamBold
-	qTitle.TextSize = 11
-	qTitle.TextColor3 = Color3.fromRGB(230, 230, 230)
-	qTitle.TextXAlignment = Enum.TextXAlignment.Left
-	qTitle.Parent = qp
-
-	local fields = {}
-	local yPos = 26
-	local function addField(name, default)
-		local row = Instance.new("Frame")
-		row.Size = UDim2.new(1, -12, 0, 22)
-		row.Position = UDim2.new(0, 6, 0, yPos)
-		row.BackgroundTransparency = 1
-		row.Parent = qp
-		local lbl = Instance.new("TextLabel")
-		lbl.Size = UDim2.new(0, 86, 1, 0)
-		lbl.BackgroundTransparency = 1
-		lbl.Text = name .. ":"
-		lbl.Font = Enum.Font.Gotham
-		lbl.TextSize = 10
-		lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-		lbl.TextXAlignment = Enum.TextXAlignment.Right
-		lbl.Parent = row
-		local box = Instance.new("TextBox")
-		box.Size = UDim2.new(0, 80, 0, 20)
-		box.Position = UDim2.new(1, -80, 0.5, -10)
-		box.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-		box.BorderSizePixel = 0
-		box.Text = default or ""
-		box.Font = Enum.Font.Gotham
-		box.TextSize = 10
-		box.TextColor3 = Color3.fromRGB(230, 230, 230)
-		box.ClearTextOnFocus = false
-		box.Parent = row
-		local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 2) bc.Parent = box
-		fields[name] = box
-		yPos += 24
+	local function mkSmallBtn(text, xo, w, col)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, w, 0, 22)
+		b.Position = UDim2.new(0, xo, 0, 0)
+		b.BackgroundColor3 = col
+		b.Text = text
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 10
+		b.TextColor3 = Color3.new(1, 1, 1)
+		b.BorderSizePixel = 0
+		b.Parent = editRow
+		local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 3) c.Parent = b
+		return b
 	end
 
-	addField("Delay (s)", "0.248")
-	addField("Hitbox X", "9")
-	addField("Hitbox Y", "10")
-	addField("Hitbox Z", "10")
-	addField("HSO", "3")
-	addField("Max Dist", "85")
-	addField("Repeat", "1")
-	addField("Rep Delay", "0.35")
+	local btnClearBlock = mkSmallBtn("Clear Block", 0, 120, Color3.fromRGB(70, 40, 40))
+	local btnClearTrade = mkSmallBtn("Clear Trade", 128, 120, Color3.fromRGB(70, 40, 40))
+	local btnClearAnim = mkSmallBtn("Clear Both (this anim)", 256, 180, Color3.fromRGB(70, 40, 40))
+	local btnClearAll = mkSmallBtn("Clear All Timings", 444, 156, Color3.fromRGB(120, 30, 30))
 
-	local dodgeRow = Instance.new("Frame")
-	dodgeRow.Size = UDim2.new(1, -12, 0, 22)
-	dodgeRow.Position = UDim2.new(0, 6, 0, yPos)
-	dodgeRow.BackgroundTransparency = 1
-	dodgeRow.Parent = qp
-	local dLbl = Instance.new("TextLabel")
-	dLbl.Size = UDim2.new(0, 86, 1, 0)
-	dLbl.BackgroundTransparency = 1
-	dLbl.Text = "Dodge Dir:"
-	dLbl.Font = Enum.Font.Gotham
-	dLbl.TextSize = 10
-	dLbl.TextColor3 = Color3.fromRGB(220, 220, 220)
-	dLbl.TextXAlignment = Enum.TextXAlignment.Right
-	dLbl.Parent = dodgeRow
-	local dBox = Instance.new("TextButton")
-	dBox.Size = UDim2.new(0, 80, 0, 20)
-	dBox.Position = UDim2.new(1, -80, 0.5, -10)
-	dBox.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	dBox.BorderSizePixel = 0
-	dBox.Text = "None"
-	dBox.Font = Enum.Font.Gotham
-	dBox.TextSize = 10
-	dBox.TextColor3 = Color3.fromRGB(230, 230, 230)
-	dBox.Parent = dodgeRow
-	local dbc = Instance.new("UICorner") dbc.CornerRadius = UDim.new(0, 2) dbc.Parent = dBox
-	local dopts = {"None", "Forward", "Backward", "Left", "Right", "Up", "Down"}
-	local didx = 1
-	dBox.MouseButton1Click:Connect(function()
-		didx = didx + 1
-		if didx > #dopts then didx = 1 end
-		dBox.Text = dopts[didx]
-	end)
-	fields["Dodge Dir"] = dBox
-
-	local saveBtn = Instance.new("TextButton")
-	saveBtn.Size = UDim2.new(1, -12, 0, 26)
-	saveBtn.Position = UDim2.new(0, 6, 1, -32)
-	saveBtn.BackgroundColor3 = Color3.fromRGB(230, 230, 230)
-	saveBtn.Text = "Save & Apply"
-	saveBtn.Font = Enum.Font.GothamBold
-	saveBtn.TextSize = 11
-	saveBtn.TextColor3 = Color3.fromRGB(20, 20, 20)
-	saveBtn.BorderSizePixel = 0
-	saveBtn.Parent = qp
-	local svc = Instance.new("UICorner") svc.CornerRadius = UDim.new(0, 3) svc.Parent = saveBtn
+	local function refreshTimingUI()
+		if not currentId then
+			blockMarker.Visible = false
+			tradeMarker.Visible = false
+			timingStatusLabel.Text = "block: -- | trade: --"
+			return
+		end
+		local t = animTimings[currentId]
+		local dur = currentDuration
+		if t and t.block and dur and dur > 0 then
+			blockMarker.Visible = true
+			blockMarker.Position = UDim2.new(t.block / dur, 0, 0, -3)
+		else
+			blockMarker.Visible = false
+		end
+		if t and t.trade and dur and dur > 0 then
+			tradeMarker.Visible = true
+			tradeMarker.Position = UDim2.new(t.trade / dur, 0, 0, -3)
+		else
+			tradeMarker.Visible = false
+		end
+		local bs = t and t.block and string.format("%.3fs", t.block) or "--"
+		local ts = t and t.trade and string.format("%.3fs", t.trade) or "--"
+		timingStatusLabel.Text = "block: " .. bs .. " | trade: " .. ts
+	end
 
 	local function buildRig()
 		if not previewWorld or not previewWorld.Parent then return end
@@ -1671,6 +1677,7 @@ function buildVisualizer()
 		currentDuration = track.Length or 0
 		paused = false
 		btnPause.Text = "Pause"
+		refreshTimingUI()
 	end
 
 	local function togglePause()
@@ -1701,12 +1708,32 @@ function buildVisualizer()
 		if frac > 1 then frac = 1 end
 		scrubFill.Size = UDim2.new(frac, 0, 1, 0)
 		timeLbl.Text = string.format("%.3fs / %.3fs", t, dur)
+		if currentId and animTimings[currentId] then
+			local tm = animTimings[currentId]
+			if tm.block and dur > 0 then
+				blockMarker.Visible = true
+				blockMarker.Position = UDim2.new(tm.block / dur, 0, 0, -3)
+			end
+			if tm.trade and dur > 0 then
+				tradeMarker.Visible = true
+				tradeMarker.Position = UDim2.new(tm.trade / dur, 0, 0, -3)
+			end
+		end
 	end)
 
 	local scrubDragging = false
 	scrubBg.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			scrubDragging = true
+			if currentTrack then
+				local left = scrubBg.AbsolutePosition.X
+				local width = scrubBg.AbsoluteSize.X
+				if width > 0 then
+					local f = math.clamp((input.Position.X - left) / width, 0, 1)
+					pausedTime = f * (currentTrack.Length or 0)
+					pcall(function() currentTrack.TimePosition = pausedTime end)
+				end
+			end
 		end
 	end)
 	scrubBg.InputChanged:Connect(function(input)
@@ -1752,6 +1779,59 @@ function buildVisualizer()
 		end
 	end)
 
+	btnSaveBlock.MouseButton1Click:Connect(function()
+		if not currentId then return end
+		if not currentTrack then return end
+		local t = currentTrack.TimePosition or 0
+		if not animTimings[currentId] then animTimings[currentId] = {} end
+		animTimings[currentId].block = t
+		saveAnimTimings()
+		refreshTimingUI()
+		if Airflow and Airflow.Notify then
+			Airflow:Notify("outlaw.dev", string.format("Block time %.3fs saved for %s", t, currentId), 3)
+		end
+	end)
+
+	btnSaveTrade.MouseButton1Click:Connect(function()
+		if not currentId then return end
+		if not currentTrack then return end
+		local t = currentTrack.TimePosition or 0
+		if not animTimings[currentId] then animTimings[currentId] = {} end
+		animTimings[currentId].trade = t
+		saveAnimTimings()
+		refreshTimingUI()
+		if Airflow and Airflow.Notify then
+			Airflow:Notify("outlaw.dev", string.format("Trade time %.3fs saved for %s", t, currentId), 3)
+		end
+	end)
+
+	btnClearBlock.MouseButton1Click:Connect(function()
+		if currentId and animTimings[currentId] then
+			animTimings[currentId].block = nil
+			saveAnimTimings()
+			refreshTimingUI()
+		end
+	end)
+	btnClearTrade.MouseButton1Click:Connect(function()
+		if currentId and animTimings[currentId] then
+			animTimings[currentId].trade = nil
+			saveAnimTimings()
+			refreshTimingUI()
+		end
+	end)
+	btnClearAnim.MouseButton1Click:Connect(function()
+		if currentId then
+			animTimings[currentId] = nil
+			saveAnimTimings()
+			refreshTimingUI()
+		end
+	end)
+	btnClearAll.MouseButton1Click:Connect(function()
+		animTimings = {}
+		saveAnimTimings()
+		refreshTimingUI()
+	end)
+
 	UserInputService.InputBegan:Connect(function(input, gp)
 		if gp then return end
 		if input.KeyCode == Enum.KeyCode.Space then
@@ -1764,6 +1844,7 @@ function buildVisualizer()
 		idBar.Text = id
 		combined.Visible = true
 		playAnim(id)
+		refreshTimingUI()
 	end
 
 	if pendingSelectAnim then
@@ -1904,7 +1985,7 @@ FarmTab:CreateButton({
 BlockTab:CreateSection("Auto Block")
 BlockTab:CreateToggle({
 	Name = "Auto Block",
-	Description = "Blocks the instant an enemy in range starts an attack animation",
+	Description = "Blocks on attack anim. Uses per-anim block time if saved, else slider default.",
 	CurrentValue = false,
 	Flag = "AB_On",
 	Callback = function(v)
@@ -1954,7 +2035,7 @@ BlockTab:CreateSlider({
 	Callback = function(v) abRange = v end,
 })
 BlockTab:CreateSlider({
-	Name = "Block Hold Time",
+	Name = "Fallback Block Hold (s)",
 	Range = {0.1, 2},
 	Increment = 0.01,
 	Suffix = "s",
@@ -2004,7 +2085,9 @@ BlockTab:CreateButton({
 		for _ in pairs(hooked) do n = n + 1 end
 		local live = workspace:FindFirstChild("Live")
 		local lc = live and #live:GetChildren() or 0
-		local msg = (inp and "Input OK" or "Input missing") .. " | Hooked: " .. n .. " | Live: " .. lc
+		local tcount = 0
+		for _ in pairs(animTimings) do tcount = tcount + 1 end
+		local msg = (inp and "Input OK" or "Input missing") .. " | Hooked: " .. n .. " | Live: " .. lc .. " | Timed anims: " .. tcount
 		Airflow:Notify("outlaw.dev", msg, 5)
 	end,
 })
@@ -2013,7 +2096,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Blocks the incoming attack then fires one M1 after the block drops",
+	Description = "Blocks then fires M1. Uses per-anim trade time if saved, else slider default.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2022,7 +2105,7 @@ TradeTab:CreateToggle({
 	end,
 })
 TradeTab:CreateSlider({
-	Name = "Delay After Block",
+	Name = "Fallback Delay After Block",
 	Range = {0, 1},
 	Increment = 0.01,
 	Suffix = "s",
@@ -2044,23 +2127,8 @@ TradeTab:CreateButton({
 	Callback = function()
 		if trading then return Airflow:Notify("outlaw.dev", "Already trading", 2) end
 		tradedThisBlock = false
-		doTrade()
+		onAttack(nil)
 		Airflow:Notify("outlaw.dev", "Trade triggered", 3)
-	end,
-})
-TradeTab:CreateButton({
-	Name = "Test Full Sequence",
-	Callback = function()
-		local i = getInput()
-		if not i then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
-		task.spawn(function()
-			pcall(function() i:FireServer("BlockOn") end)
-			task.wait(abHold + (pingComp and (pingCompMs / 1000) or 0))
-			pcall(function() i:FireServer("BlockOff") end)
-			task.wait(tradeDelay)
-			fireM1()
-		end)
-		Airflow:Notify("outlaw.dev", "Block -> off -> M1 fired", 3)
 	end,
 })
 TradeTab:CreateButton({
@@ -2385,9 +2453,22 @@ VisTab:CreateToggle({
 		if getgenv().OutlawVisualizer then getgenv().OutlawVisualizer.Visible = v end
 	end,
 })
-VisTab:CreateSection("Info")
-VisTab:CreateLabel("Click any row in Block Builder or Player Block Builder.")
-VisTab:CreateLabel("It opens the Visualizer and plays that animation.")
+VisTab:CreateSection("How to save per-anim timing")
+VisTab:CreateLabel("1. Click a row in either logger.")
+VisTab:CreateLabel("2. Scrub to the frame you want (green = block, orange = trade).")
+VisTab:CreateLabel("3. Click Save Block Time or Save Trade Time.")
+VisTab:CreateLabel("4. Turn on Auto Block and/or M1 Trade.")
+VisTab:CreateLabel("Each animation id stores its own block and trade times.")
+VisTab:CreateSection("Persistence")
+VisTab:CreateLabel("Saved to outlaw_anim_timings.json. Auto-loads on inject.")
+VisTab:CreateButton({
+	Name = "Clear ALL Saved Timings",
+	Callback = function()
+		animTimings = {}
+		saveAnimTimings()
+		if Airflow then Airflow:Notify("outlaw.dev", "All anim timings cleared", 3) end
+	end,
+})
 
 -- ===== PLAYER =====
 PlayerTab:CreateSection("Movement")
@@ -2555,6 +2636,8 @@ SettingsTab:CreateButton({
 })
 
 -- ===== STARTUP =====
+loadAnimTimings()
+
 task.spawn(function()
 	task.wait(1.2)
 	buildLogger()
@@ -2622,4 +2705,4 @@ LP.CharacterAdded:Connect(function()
 	if headRideOn then hookMyAnimator() end
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. Farm + Block + Trade + Head Ride + Nanami + Yuji + Visualizer + Loggers.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. Per-anim timing wired into Auto Block and M1 Trade.", 5)
