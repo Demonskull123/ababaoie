@@ -54,9 +54,10 @@ local State = {
 	headRide        = false,
 	headRideTarget  = nil,
 	headRideConn    = nil,
-	headRideOffset  = 2.0,
+	headRideOffset  = 3,
 	headRideDur     = 1.5,
 	headRideEnd     = 0,
+	headRideAlpha   = 0.35,
 	headRidePending = false,
 	myAnimConn      = nil,
 	myAtkConn       = nil,
@@ -387,12 +388,6 @@ local function stopHeadRide()
 		pcall(function() State.headRideConn:Disconnect() end)
 		State.headRideConn = nil
 	end
-	local char = LP.Character
-	local myRoot = char and char:FindFirstChild("HumanoidRootPart")
-	if myRoot then
-		myRoot.AssemblyLinearVelocity  = Vector3.new()
-		myRoot.AssemblyAngularVelocity = Vector3.new()
-	end
 end
 
 local function startHeadRide(hum)
@@ -403,61 +398,30 @@ local function startHeadRide(hum)
 	State.headRideEnd = tick() + State.headRideDur
 
 	if State.headRideConn then
-		pcall(function() State.headRideConn:Disconnect() end)
+		State.headRideConn:Disconnect()
 		State.headRideConn = nil
 	end
 
-	local riding = true
-	local lastWrite = 0
-
-	State.headRideConn = RunService.Heartbeat:Connect(function()
-		if not State.headRide or tick() >= State.headRideEnd or not riding then
-			riding = false
-			State.headRidePending = false
+	State.headRideConn = RunService.RenderStepped:Connect(function(dt)
+		if not State.headRide or tick() >= State.headRideEnd then
 			stopHeadRide()
 			return
 		end
-
-		local now = tick()
-		if now - lastWrite < 0.05 then return end
-		lastWrite = now
 
 		local model = hum and hum.Parent
-		if not model or not model.Parent then
-			riding = false
-			State.headRidePending = false
-			stopHeadRide()
-			return
-		end
+		if not model or not model.Parent then stopHeadRide() return end
 
 		local myChar = LP.Character
 		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-		local myHum  = myChar and myChar:FindFirstChildOfClass("Humanoid")
 		local theirHead = model:FindFirstChild("Head")
-			or model:FindFirstChild("UpperTorso")
-			or model:FindFirstChild("Torso")
-		if not myRoot or not theirHead then
-			riding = false
-			State.headRidePending = false
-			stopHeadRide()
-			return
-		end
+		if not myRoot or not theirHead then stopHeadRide() return end
 
-		if theirHead.AssemblyLinearVelocity.Y < -60 then
-			riding = false
-			State.headRidePending = false
-			stopHeadRide()
-			return
-		end
+		if theirHead.AssemblyLinearVelocity.Y < -60 then stopHeadRide() return end
 
-		local targetPos = theirHead.Position + Vector3.new(0, State.headRideOffset, 0)
-		myRoot.CFrame = CFrame.new(targetPos, targetPos + theirHead.CFrame.LookVector)
-		myRoot.AssemblyLinearVelocity  = Vector3.new()
-		myRoot.AssemblyAngularVelocity = Vector3.new()
-
-		if myHum then
-			myHum.PlatformStand = false
-		end
+		local targetCF = theirHead.CFrame * CFrame.new(0, State.headRideOffset, 0)
+		local alpha = 1 - math.exp(-dt / math.max(State.headRideAlpha, 1e-4))
+		myRoot.CFrame = myRoot.CFrame:Lerp(targetCF, alpha)
+		myRoot.AssemblyLinearVelocity = Vector3.new()
 	end)
 end
 
@@ -499,10 +463,8 @@ local function waitForHitThenRide()
 	end
 
 	local startTime = tick()
-	local fired = false
 	local conn
 	conn = RunService.Heartbeat:Connect(function()
-		if fired then return end
 		if not State.headRide or tick() - startTime > 0.6 then
 			conn:Disconnect()
 			State.headRidePending = false
@@ -531,8 +493,8 @@ local function waitForHitThenRide()
 		end
 
 		if hit then
-			fired = true
 			conn:Disconnect()
+			State.headRidePending = false
 			startHeadRide(hum)
 		end
 	end)
@@ -1027,8 +989,7 @@ local function doServerHop()
 				.. "/servers/Public?sortOrder=Asc&limit=100"
 			local data = HttpService:JSONDecode(game:HttpGet(url))
 			if data and data.data then
-				for _, srv in ipairs(data.data) do
-					if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers
+				for _, srv in ipairs(data.data) do					if srv.playing and srv.maxPlayers and srv.playing < srv.maxPlayers
 						and srv.id ~= game.JobId then
 						TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LP)
 						return
@@ -2457,7 +2418,7 @@ TradeTab:CreateButton({
 HeadRideTab:CreateSection("Head Ride")
 HeadRideTab:CreateToggle({
 	Name = "Auto Head Ride",
-	Description = "When your finisher HITS an enemy, snaps onto their head and rides",
+	Description = "When your finisher HITS an enemy, glides above them and drops off",
 	CurrentValue = false,
 	Flag = "HR_On",
 	Callback = function(v)
@@ -2479,11 +2440,19 @@ HeadRideTab:CreateToggle({
 })
 HeadRideTab:CreateSlider({
 	Name = "Head Offset",
-	Range = { 0, 8 },
+	Range = { -2, 10 },
 	Increment = 0.1,
-	CurrentValue = 2,
+	CurrentValue = 3,
 	Flag = "HR_Offset",
 	Callback = function(v) State.headRideOffset = v end,
+})
+HeadRideTab:CreateSlider({
+	Name = "Smoothness (time constant)",
+	Range = { 0.05, 1 },
+	Increment = 0.05,
+	CurrentValue = 0.35,
+	Flag = "HR_Alpha",
+	Callback = function(v) State.headRideAlpha = v end,
 })
 HeadRideTab:CreateSlider({
 	Name = "Ride Duration (s)",
