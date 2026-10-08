@@ -43,6 +43,7 @@ local State = {
 
 	trade           = false,
 	tradeWindow     = 0.05,
+	tradeRange      = 25,
 	lastTradeAt     = 0,
 
 	blockEndThread  = nil,
@@ -390,21 +391,32 @@ local function startHeadRide(hum)
 	State.headRideEnd = tick() + State.headRideDur
 
 	if State.headRideConn then
-		State.headRideConn:Disconnect()
+		pcall(function() State.headRideConn:Disconnect() end)
 		State.headRideConn = nil
 	end
 
 	local riding = true
+	local lastWrite = 0
 
 	State.headRideConn = RunService.Heartbeat:Connect(function()
 		if not State.headRide or tick() >= State.headRideEnd or not riding then
 			riding = false
+			State.headRidePending = false
 			stopHeadRide()
 			return
 		end
 
+		local now = tick()
+		if now - lastWrite < 0.05 then return end
+		lastWrite = now
+
 		local model = hum and hum.Parent
-		if not model or not model.Parent then riding = false stopHeadRide() return end
+		if not model or not model.Parent then
+			riding = false
+			State.headRidePending = false
+			stopHeadRide()
+			return
+		end
 
 		local myChar = LP.Character
 		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -412,9 +424,19 @@ local function startHeadRide(hum)
 		local theirHead = model:FindFirstChild("Head")
 			or model:FindFirstChild("UpperTorso")
 			or model:FindFirstChild("Torso")
-		if not myRoot or not theirHead then riding = false stopHeadRide() return end
+		if not myRoot or not theirHead then
+			riding = false
+			State.headRidePending = false
+			stopHeadRide()
+			return
+		end
 
-		if theirHead.AssemblyLinearVelocity.Y < -60 then riding = false stopHeadRide() return end
+		if theirHead.AssemblyLinearVelocity.Y < -60 then
+			riding = false
+			State.headRidePending = false
+			stopHeadRide()
+			return
+		end
 
 		local targetPos = theirHead.Position + Vector3.new(0, State.headRideOffset, 0)
 		myRoot.CFrame = CFrame.new(targetPos, targetPos + theirHead.CFrame.LookVector)
@@ -465,8 +487,10 @@ local function waitForHitThenRide()
 	end
 
 	local startTime = tick()
+	local fired = false
 	local conn
 	conn = RunService.Heartbeat:Connect(function()
+		if fired then return end
 		if not State.headRide or tick() - startTime > 0.6 then
 			conn:Disconnect()
 			State.headRidePending = false
@@ -495,8 +519,8 @@ local function waitForHitThenRide()
 		end
 
 		if hit then
+			fired = true
 			conn:Disconnect()
-			State.headRidePending = false
 			startHeadRide(hum)
 		end
 	end)
@@ -539,7 +563,7 @@ local function hookMyAttacks()
 		if comboEndIds[id] then return end
 		if not atkIds[id] and not animTimings[id] then return end
 		if not State.autoBlock and not State.trade then return end
-		onAttack(id)
+		onAttack(id, LP.Character)
 	end)
 end
 
@@ -570,7 +594,7 @@ local function blockPulse(duration)
 	end)
 end
 
-local function onAttack(animId)
+local function onAttack(animId, sourceModel)
 	if not State.autoBlock and not State.trade then return end
 
 	local timing       = animId and animTimings[animId] or nil
@@ -588,6 +612,19 @@ local function onAttack(animId)
 	if State.trade then
 		local now = tick()
 		if now - State.lastTradeAt < State.tradeWindow then return end
+
+		local myChar = LP.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
+
+		if sourceModel and sourceModel ~= myChar then
+			local theirRoot = sourceModel:FindFirstChild("HumanoidRootPart")
+			if theirRoot then
+				local d = (myRoot.Position - theirRoot.Position).Magnitude
+				if d > State.tradeRange then return end
+			end
+		end
+
 		State.lastTradeAt = now
 		fireM1()
 	end
@@ -707,7 +744,7 @@ local function hookHumanoid(hum)
 		if not myRoot or not theirRoot then return end
 		if (myRoot.Position - theirRoot.Position).Magnitude > State.blockRange then return end
 
-		onAttack(id)
+		onAttack(id, model)
 	end)
 
 	local ancestryConn
@@ -2302,7 +2339,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Fires 1 M1 the instant an attack anim is detected. Does not gate block.",
+	Description = "Fires exactly 1 M1 the instant an attack anim is detected, inside your block window.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2314,6 +2351,15 @@ TradeTab:CreateToggle({
 			stopHooks()
 		end
 	end,
+})
+TradeTab:CreateSlider({
+	Name = "Trade Range",
+	Description = "Only fires trade M1 if the attacker is within this distance.",
+	Range = { 5, 200 },
+	Increment = 1,
+	CurrentValue = 25,
+	Flag = "MT_Range",
+	Callback = function(v) State.tradeRange = v end,
 })
 TradeTab:CreateSlider({
 	Name = "Trade Window (s)",
@@ -2338,7 +2384,7 @@ TradeTab:CreateButton({
 	Name = "Test Trade Now",
 	Callback = function()
 		State.lastTradeAt = 0
-		onAttack(nil)
+		onAttack(nil, nearestTarget())
 		Airflow:Notify("outlaw.dev", "Trade triggered", 3)
 	end,
 })
