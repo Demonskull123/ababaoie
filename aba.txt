@@ -44,7 +44,7 @@ local State = {
 	tradeDelay      = 0.04,
 	tradeWindow     = 0.05,
 	tradeHitGap     = 0.12,
-	tradeHits       = 2,
+	tradeHits       = 1,
 	lastTradeAt     = 0,
 
 	blockEndThread  = nil,
@@ -684,7 +684,6 @@ local function lockTick()
 	if not myRoot or not hum then return end
 
 	if hum.AutoRotate then hum.AutoRotate = false end
-	if hum.AutoJumpEnabled == nil then end
 
 	local p = myRoot.Position
 	local t = target.Position
@@ -2323,7 +2322,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Block -> M1 -> Block. Blocks all attack anims. Never gated.",
+	Description = "Block -> single M1 -> Block on every detected attack anim.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2356,16 +2355,16 @@ TradeTab:CreateSlider({
 })
 TradeTab:CreateSlider({
 	Name = "Hits Per Attack",
-	Description = "How many M1s to fire after each detected attack anim. 2 = double tap.",
+	Description = "How many M1s per detected attack anim.",
 	Range = { 1, 5 },
 	Increment = 1,
-	CurrentValue = 2,
+	CurrentValue = 1,
 	Flag = "MT_Hits",
 	Callback = function(v) State.tradeHits = v end,
 })
 TradeTab:CreateSlider({
 	Name = "Hit Gap (s)",
-	Description = "Delay between trade M1s.",
+	Description = "Delay between M1s when Hits > 1.",
 	Range = { 0.05, 0.5 },
 	Increment = 0.01,
 	Suffix = "s",
@@ -2958,4 +2957,4 @@ LP.CharacterAdded:Connect(function()
 	if State.headRide then hookMyAnimator() end
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. Lock holds through skills. Trade = block/m1/block.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. Trade = block/m1/block, single M1 per attack.", 5)
