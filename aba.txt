@@ -41,15 +41,13 @@ local State = {
 	pingCompMs      = 50,
 
 	trade           = false,
-	tradeDelay      = 0.04,
+	tradeDelay      = 0.01,
 	tradeWindow     = 0.05,
-	tradeHitGap     = 0.12,
 	tradeHits       = 1,
 	lastTradeAt     = 0,
 
 	blockEndThread  = nil,
 	blockHoldUntil  = 0,
-	blockOnRemote   = false,
 
 	headRide        = false,
 	headRideTarget  = nil,
@@ -105,6 +103,7 @@ local State = {
 	lock            = false,
 	lockActive      = false,
 	lockRange       = 50,
+	lockTarget      = nil,
 	forcedLock      = nil,
 
 	autoRejoin      = false,
@@ -139,7 +138,15 @@ local Visualizer = {
 	camera     = nil,
 	gui        = nil,
 	frame      = nil,
-	pendingId  = nil,
+	idBar      = nil,
+	blockMarker = nil,
+	tradeMarker = nil,
+	timingLbl   = nil,
+	statusBadge = nil,
+	btnPause    = nil,
+	scrubFill   = nil,
+	timeLbl     = nil,
+	built       = false,
 }
 
 local animTimings = {}
@@ -515,13 +522,11 @@ local function blockOn(duration)
 	end
 
 	pcall(function() input:FireServer("BlockOn") end)
-	State.blockOnRemote = true
 	State.blockHoldUntil = newEnd
 
 	State.blockEndThread = task.delay(duration, function()
 		local i = getInput()
 		if i then pcall(function() i:FireServer("BlockOff") end) end
-		State.blockOnRemote = false
 		State.blockEndThread = nil
 		State.blockHoldUntil = 0
 	end)
@@ -550,13 +555,11 @@ local function onAttack(animId)
 
 			local preHitWait = hasTradeTime
 				and (timing.trade + State.tradeDelay)
-				or  (State.blockHold + ping + State.tradeDelay)
+				or  (ping + State.tradeDelay)
 			task.wait(preHitWait)
 
-			for i = 1, State.tradeHits do
-				if not State.trade then break end
+			if State.trade then
 				fireM1()
-				if i < State.tradeHits then task.wait(State.tradeHitGap) end
 			end
 
 			blockOn(blockDuration)
@@ -645,37 +648,51 @@ local function farmLoop()
 	end)
 end
 
-local function lockTick()
+local function resolveLockTarget()
 	local target = State.forcedLock
-
 	if target and not target.Parent then
 		State.forcedLock = nil
 		target = nil
 	end
 
-	if not target then
-		if not State.lock then return end
+	if target then
+		State.lockTarget = target
+		return target
+	end
 
-		local myChar = LP.Character
-		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-		if not myRoot then return end
+	local cached = State.lockTarget
+	if cached and not cached.Parent then
+		State.lockTarget = nil
+		cached = nil
+	end
 
-		local best, bestDist = nil, State.lockRange
-		for hum in pairs(hooked) do
-			local model = hum.Parent
-			if model and model.Parent and model ~= myChar and not isTeammate(model) then
-				local root = model:FindFirstChild("HumanoidRootPart")
-				if root and hum.Health > 0 then
-					local dist = (root.Position - myRoot.Position).Magnitude
-					if dist < bestDist then
-						best, bestDist = root, dist
-					end
+	if not State.lock then
+		return cached
+	end
+
+	local myChar = LP.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	if not myRoot then return cached end
+
+	local best, bestDist = nil, State.lockRange
+	for hum in pairs(hooked) do
+		local model = hum.Parent
+		if model and model.Parent and model ~= myChar and not isTeammate(model) and hum.Health > 0 then
+			local root = model:FindFirstChild("HumanoidRootPart")
+			if root then
+				local dist = (root.Position - myRoot.Position).Magnitude
+				if dist < bestDist then
+					best, bestDist = root, dist
 				end
 			end
 		end
-		target = best
 	end
+	State.lockTarget = best
+	return best or cached
+end
 
+local function lockTick()
+	local target = resolveLockTarget()
 	if not target then return end
 
 	local myChar = LP.Character
@@ -688,7 +705,6 @@ local function lockTick()
 	local p = myRoot.Position
 	local t = target.Position
 	local flat = Vector3.new(t.X, p.Y, t.Z)
-	if (flat - p).Magnitude < 0.05 then return end
 
 	myRoot.CFrame = CFrame.lookAt(p, flat)
 	myRoot.AssemblyAngularVelocity = Vector3.new()
@@ -732,12 +748,20 @@ local function hookHumanoid(hum)
 
 		local id = track.Animation and track.Animation.AnimationId
 		if not id then return end
-		if not State.autoBlock and not State.trade then return end
 
 		local myChar = LP.Character
 		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
 		local theirRoot = model:FindFirstChild("HumanoidRootPart")
 		if not myRoot or not theirRoot then return end
+
+		if State.lock and not State.forcedLock then
+			local dist = (myRoot.Position - theirRoot.Position).Magnitude
+			if dist < State.lockRange and hum.Health > 0 and not isTeammate(model) then
+				State.lockTarget = theirRoot
+			end
+		end
+
+		if not State.autoBlock and not State.trade then return end
 		if (myRoot.Position - theirRoot.Position).Magnitude > State.blockRange then return end
 
 		local isKnownAttack = atkIds[id] or animTimings[id] ~= nil
@@ -820,7 +844,7 @@ local function startHooks()
 	local live = workspace:FindFirstChild("Live")
 	if live then
 		HookConns.live = live.ChildAdded:Connect(function(c)
-			if not State.autoBlock and not State.trade and not State.headRide and not State.farm then return end
+			if not State.autoBlock and not State.trade and not State.headRide and not State.farm and not State.lock then return end
 			if not State.hookDummies then return end
 			if c:IsA("Model") then
 				local h = c:FindFirstChildOfClass("Humanoid")
@@ -830,7 +854,7 @@ local function startHooks()
 	end
 
 	HookConns.descendant = workspace.DescendantAdded:Connect(function(o)
-		if not State.autoBlock and not State.trade and not State.headRide and not State.farm then return end
+		if not State.autoBlock and not State.trade and not State.headRide and not State.farm and not State.lock then return end
 		if o:IsA("Humanoid") then
 			local mc = LP.Character
 			if not (o.Parent and mc and o.Parent == mc) then hookHumanoid(o) end
@@ -842,7 +866,7 @@ local function startHooks()
 
 	HookConns.playerAdded = Players.PlayerAdded:Connect(function(plr)
 		plr.CharacterAdded:Connect(function(c)
-			if not State.autoBlock and not State.trade and not State.headRide and not State.farm then return end
+			if not State.autoBlock and not State.trade and not State.headRide and not State.farm and not State.lock then return end
 			if not State.hookPlayers then return end
 			local h = c:WaitForChild("Humanoid", 5)
 			if h then hookHumanoid(h) end
@@ -1531,6 +1555,21 @@ local function hookContainer(container)
 	end
 end
 
+local function selectAnim(id)
+	if not id then return end
+	local fn = getgenv().OutlawSelectAnim
+	if type(fn) == "function" then
+		local okCall = pcall(fn, id)
+		if okCall then return end
+	end
+	Visualizer.pendingId = id
+	if not Visualizer.built then
+		task.spawn(function()
+			pcall(buildVisualizer)
+		end)
+	end
+end
+
 function buildVisualizer()
 	for _, root in ipairs({ gethui and gethui() or nil, game:GetService("CoreGui"), LP:FindFirstChild("PlayerGui") }) do
 		if root then
@@ -1540,6 +1579,7 @@ function buildVisualizer()
 	end
 	getgenv().OutlawVisualizer = nil
 	getgenv().OutlawSelectAnim = nil
+	Visualizer.built = false
 
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "OutlawVisualizer"
@@ -2032,16 +2072,26 @@ function buildVisualizer()
 		togglePause()
 	end)
 
-	Visualizer.gui      = gui
-	Visualizer.frame    = frame
-	Visualizer.viewport = viewport
-	Visualizer.camera   = camera
-	Visualizer.world    = world
+	Visualizer.gui       = gui
+	Visualizer.frame     = frame
+	Visualizer.viewport  = viewport
+	Visualizer.camera    = camera
+	Visualizer.world     = world
+	Visualizer.idBar     = idBar
+	Visualizer.blockMarker = blockMarker
+	Visualizer.tradeMarker = tradeMarker
+	Visualizer.timingLbl   = timingLbl
+	Visualizer.statusBadge = statusBadge
+	Visualizer.btnPause    = btnPause
+	Visualizer.scrubFill   = scrubFill
+	Visualizer.timeLbl     = timeLbl
+	Visualizer.built       = true
 
 	getgenv().OutlawSelectAnim = function(id)
+		if not id then return end
 		Visualizer.currentId = id
-		idBar.Text = id
-		frame.Visible = true
+		if Visualizer.idBar then Visualizer.idBar.Text = id end
+		if Visualizer.frame then Visualizer.frame.Visible = true end
 		playAnim(id)
 		refreshTimingUI()
 	end
@@ -2064,26 +2114,6 @@ function buildVisualizer()
 	end)
 
 	getgenv().OutlawVisualizer = frame
-end
-
-local function selectAnim(id)
-	if not id then return end
-	local fn = getgenv().OutlawSelectAnim
-	if type(fn) == "function" then
-		local okCall = pcall(fn, id)
-		if okCall then return end
-	end
-	Visualizer.pendingId = id
-	if not (getgenv().OutlawVisualizer and getgenv().OutlawVisualizer.Parent) then
-		task.spawn(function()
-			pcall(buildVisualizer)
-			local pending = Visualizer.pendingId
-			if pending and getgenv().OutlawSelectAnim then
-				Visualizer.pendingId = nil
-				pcall(getgenv().OutlawSelectAnim, pending)
-			end
-		end)
-	end
 end
 
 local Window = Airflow:CreateWindow({
@@ -2127,7 +2157,7 @@ FarmTab:CreateToggle({
 			State.farmTarget = nil
 			State.forcedLock = nil
 			if not State.lock then detachLock() end
-			if not State.autoBlock and not State.trade and not State.headRide then
+			if not State.autoBlock and not State.trade and not State.headRide and not State.lock then
 				stopHooks()
 			end
 		end
@@ -2208,7 +2238,7 @@ BlockTab:CreateToggle({
 		State.autoBlock = v
 		if v then
 			startHooks()
-		elseif not State.trade and not State.headRide and not State.farm then
+		elseif not State.trade and not State.headRide and not State.farm and not State.lock then
 			stopHooks()
 		end
 	end,
@@ -2219,7 +2249,7 @@ BlockTab:CreateToggle({
 	Flag = "AB_HookDummies",
 	Callback = function(v)
 		State.hookDummies = v
-		if v and (State.autoBlock or State.trade or State.headRide or State.farm) then
+		if v and (State.autoBlock or State.trade or State.headRide or State.farm or State.lock) then
 			hookLive()
 		end
 	end,
@@ -2230,7 +2260,7 @@ BlockTab:CreateToggle({
 	Flag = "AB_HookPlayers",
 	Callback = function(v)
 		State.hookPlayers = v
-		if v and (State.autoBlock or State.trade or State.headRide or State.farm) then
+		if v and (State.autoBlock or State.trade or State.headRide or State.farm or State.lock) then
 			hookPlayersFunc()
 		end
 	end,
@@ -2322,14 +2352,14 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Block -> single M1 -> Block on every detected attack anim.",
+	Description = "Block -> single M1 -> Block on every detected attack anim. Never gated.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
 		State.trade = v
 		if v then
 			startHooks()
-		elseif not State.autoBlock and not State.headRide and not State.farm then
+		elseif not State.autoBlock and not State.headRide and not State.farm and not State.lock then
 			stopHooks()
 		end
 	end,
@@ -2339,7 +2369,7 @@ TradeTab:CreateSlider({
 	Range = { 0, 1 },
 	Increment = 0.01,
 	Suffix = "s",
-	CurrentValue = 0.04,
+	CurrentValue = 0.01,
 	Flag = "MT_Delay",
 	Callback = function(v) State.tradeDelay = v end,
 })
@@ -2353,49 +2383,7 @@ TradeTab:CreateSlider({
 	Flag = "MT_Window",
 	Callback = function(v) State.tradeWindow = v end,
 })
-TradeTab:CreateSlider({
-	Name = "Hits Per Attack",
-	Description = "How many M1s per detected attack anim.",
-	Range = { 1, 5 },
-	Increment = 1,
-	CurrentValue = 1,
-	Flag = "MT_Hits",
-	Callback = function(v) State.tradeHits = v end,
-})
-TradeTab:CreateSlider({
-	Name = "Hit Gap (s)",
-	Description = "Delay between M1s when Hits > 1.",
-	Range = { 0.05, 0.5 },
-	Increment = 0.01,
-	Suffix = "s",
-	CurrentValue = 0.12,
-	Flag = "MT_HitGap",
-	Callback = function(v) State.tradeHitGap = v end,
-})
-TradeTab:CreateSection("Manual Test")
-TradeTab:CreateButton({
-	Name = "Test Fire M1",
-	Callback = function()
-		if not getInput() then return Airflow:Notify("outlaw.dev", "Input not found", 3) end
-		fireM1()
-		Airflow:Notify("outlaw.dev", "M1 fired", 2)
-	end,
-})
-TradeTab:CreateButton({
-	Name = "Test Trade Now",
-	Callback = function()
-		State.lastTradeAt = 0
-		onAttack(nil)
-		Airflow:Notify("outlaw.dev", "Trade triggered", 3)
-	end,
-})
-TradeTab:CreateButton({
-	Name = "Force Reset Trade Lock",
-	Callback = function()
-		State.lastTradeAt = 0
-		Airflow:Notify("outlaw.dev", "Trade lock reset", 2)
-	end,
-})
+TradeTab:CreateLabel("1 M1 per attack. Fixed.")
 
 HeadRideTab:CreateSection("Head Ride")
 HeadRideTab:CreateToggle({
@@ -2414,7 +2402,7 @@ HeadRideTab:CreateToggle({
 				pcall(function() State.myAnimConn:Disconnect() end)
 				State.myAnimConn = nil
 			end
-			if not State.autoBlock and not State.trade and not State.farm then
+			if not State.autoBlock and not State.trade and not State.farm and not State.lock then
 				stopHooks()
 			end
 		end
@@ -2824,15 +2812,19 @@ PlayerTab:CreateSlider({
 PlayerTab:CreateSection("Character Lock")
 PlayerTab:CreateToggle({
 	Name = "Character Lock",
-	Description = "Keeps your character facing the target through M1s and skills.",
+	Description = "Keeps your character facing the target through M1s, skills, and idle.",
 	CurrentValue = false,
 	Flag = "PL_Lock",
 	Callback = function(v)
 		State.lock = v
 		if v then
+			startHooks()
 			attachLock()
 		elseif not State.farm then
 			detachLock()
+			if not State.autoBlock and not State.trade and not State.headRide then
+				stopHooks()
+			end
 		end
 	end,
 })
@@ -2957,4 +2949,4 @@ LP.CharacterAdded:Connect(function()
 	if State.headRide then hookMyAnimator() end
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. Trade = block/m1/block, single M1 per attack.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. Lock holds through skills + idle. 1 M1 per trade.", 5)
