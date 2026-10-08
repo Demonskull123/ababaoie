@@ -42,10 +42,7 @@ local State = {
 	pingCompMs      = 50,
 
 	trade           = false,
-	tradeDelay      = 0.04,
 	tradeWindow     = 0.05,
-	tradeHitGap     = 0.12,
-	tradeHits       = 2,
 	lastTradeAt     = 0,
 
 	blockEndThread  = nil,
@@ -54,12 +51,12 @@ local State = {
 	headRide        = false,
 	headRideTarget  = nil,
 	headRideConn    = nil,
-	headRideOffset  = 3,
+	headRideOffset  = 2.0,
 	headRideDur     = 1.5,
 	headRideEnd     = 0,
-	headRideAlpha   = 0.35,
 	headRidePending = false,
 	myAnimConn      = nil,
+	myAtkConn       = nil,
 
 	farm            = false,
 	farmPosMode     = "On Top",
@@ -377,6 +374,12 @@ local function stopHeadRide()
 		pcall(function() State.headRideConn:Disconnect() end)
 		State.headRideConn = nil
 	end
+	local char = LP.Character
+	local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+	if myRoot then
+		myRoot.AssemblyLinearVelocity  = Vector3.new()
+		myRoot.AssemblyAngularVelocity = Vector3.new()
+	end
 end
 
 local function startHeadRide(hum)
@@ -391,26 +394,36 @@ local function startHeadRide(hum)
 		State.headRideConn = nil
 	end
 
-	State.headRideConn = RunService.RenderStepped:Connect(function(dt)
-		if not State.headRide or tick() >= State.headRideEnd then
+	local riding = true
+
+	State.headRideConn = RunService.Heartbeat:Connect(function()
+		if not State.headRide or tick() >= State.headRideEnd or not riding then
+			riding = false
 			stopHeadRide()
 			return
 		end
 
 		local model = hum and hum.Parent
-		if not model or not model.Parent then stopHeadRide() return end
+		if not model or not model.Parent then riding = false stopHeadRide() return end
 
 		local myChar = LP.Character
 		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		local myHum  = myChar and myChar:FindFirstChildOfClass("Humanoid")
 		local theirHead = model:FindFirstChild("Head")
-		if not myRoot or not theirHead then stopHeadRide() return end
+			or model:FindFirstChild("UpperTorso")
+			or model:FindFirstChild("Torso")
+		if not myRoot or not theirHead then riding = false stopHeadRide() return end
 
-		if theirHead.AssemblyLinearVelocity.Y < -60 then stopHeadRide() return end
+		if theirHead.AssemblyLinearVelocity.Y < -60 then riding = false stopHeadRide() return end
 
-		local targetCF = theirHead.CFrame * CFrame.new(0, State.headRideOffset, 0)
-		local alpha = 1 - math.exp(-dt / math.max(State.headRideAlpha, 1e-4))
-		myRoot.CFrame = myRoot.CFrame:Lerp(targetCF, alpha)
-		myRoot.AssemblyLinearVelocity = Vector3.new()
+		local targetPos = theirHead.Position + Vector3.new(0, State.headRideOffset, 0)
+		myRoot.CFrame = CFrame.new(targetPos, targetPos + theirHead.CFrame.LookVector)
+		myRoot.AssemblyLinearVelocity  = Vector3.new()
+		myRoot.AssemblyAngularVelocity = Vector3.new()
+
+		if myHum then
+			myHum.PlatformStand = false
+		end
 	end)
 end
 
@@ -509,6 +522,27 @@ local function hookMyAnimator()
 	end)
 end
 
+local function hookMyAttacks()
+	if State.myAtkConn then
+		pcall(function() State.myAtkConn:Disconnect() end)
+		State.myAtkConn = nil
+	end
+
+	local char = LP.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+	if not animator then return end
+
+	State.myAtkConn = animator.AnimationPlayed:Connect(function(track)
+		local id = track.Animation and track.Animation.AnimationId
+		if not id then return end
+		if comboEndIds[id] then return end
+		if not atkIds[id] and not animTimings[id] then return end
+		if not State.autoBlock and not State.trade then return end
+		onAttack(id)
+	end)
+end
+
 local function blockPulse(duration)
 	local input = getInput()
 	if not input then return end
@@ -541,7 +575,6 @@ local function onAttack(animId)
 
 	local timing       = animId and animTimings[animId] or nil
 	local hasBlockTime = timing and timing.block ~= nil
-	local hasTradeTime = timing and timing.trade ~= nil
 	local ping         = State.pingComp and State.pingCompMs / 1000 or 0
 
 	if State.autoBlock then
@@ -556,19 +589,7 @@ local function onAttack(animId)
 		local now = tick()
 		if now - State.lastTradeAt < State.tradeWindow then return end
 		State.lastTradeAt = now
-
-		task.spawn(function()
-			local waitTime = hasTradeTime
-				and (timing.trade + State.tradeDelay)
-				or  (State.blockHold + ping + State.tradeDelay)
-			task.wait(waitTime)
-
-			for i = 1, State.tradeHits do
-				if not State.trade then break end
-				fireM1()
-				if i < State.tradeHits then task.wait(State.tradeHitGap) end
-			end
-		end)
+		fireM1()
 	end
 end
 
@@ -886,16 +907,19 @@ end
 local function lockTick()
 	local target = State.forcedLock
 
+	local myChar = LP.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	local hum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+	if not myRoot or not hum then return end
+
+	if hum.AutoRotate then hum.AutoRotate = false end
+
 	if not target then
 		if not State.lock then return end
 
-		local myChar = LP.Character
-		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-		if not myRoot then return end
-
 		local best, bestDist = nil, State.lockRange
-		for hum in pairs(hooked) do
-			local model = hum.Parent
+		for hum2 in pairs(hooked) do
+			local model = hum2.Parent
 			if model and model.Parent and model ~= myChar and not isTeammate(model) then
 				local root = model:FindFirstChild("HumanoidRootPart")
 				if root then
@@ -911,14 +935,8 @@ local function lockTick()
 
 	if not target then return end
 
-	local myChar = LP.Character
-	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-	local hum = myChar and myChar:FindFirstChildOfClass("Humanoid")
-	if not myRoot or not hum then return end
-
 	local p = myRoot.Position
 	local t = target.Position
-	if hum.AutoRotate then hum.AutoRotate = false end
 	myRoot.CFrame = CFrame.lookAt(p, Vector3.new(t.X, p.Y, t.Z))
 end
 
@@ -977,7 +995,8 @@ local function doJoinLowest()
 				TeleportService:TeleportToPlaceInstance(game.PlaceId, bestId, LP)
 			else
 				TeleportService:Teleport(game.PlaceId, LP)
-			end		end)
+			end
+		end)
 		if not okJoin then doRejoin() end
 	end)
 end
@@ -1001,6 +1020,7 @@ end
 LP.CharacterAdded:Connect(function()
 	task.wait(1)
 	if State.headRide then hookMyAnimator() end
+	hookMyAttacks()
 	if State.autoRejoin then
 		task.spawn(function()
 			task.wait(5)
@@ -2160,13 +2180,14 @@ FarmTab:CreateButton({
 BlockTab:CreateSection("Auto Block")
 BlockTab:CreateToggle({
 	Name = "Auto Block",
-	Description = "Blocks on every known attack id or anim with saved timings. Never gated by trade.",
+	Description = "Blocks on every known attack id or anim with saved timings. Fires on your own skill anims too.",
 	CurrentValue = false,
 	Flag = "AB_On",
 	Callback = function(v)
 		State.autoBlock = v
 		if v then
 			startHooks()
+			hookMyAttacks()
 		elseif not State.trade and not State.headRide and not State.farm then
 			stopHooks()
 		end
@@ -2281,55 +2302,28 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Fires exactly 2 M1 hits per detected attack anim. Does not gate block.",
+	Description = "Fires 1 M1 the instant an attack anim is detected. Does not gate block.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
 		State.trade = v
 		if v then
 			startHooks()
+			hookMyAttacks()
 		elseif not State.autoBlock and not State.headRide and not State.farm then
 			stopHooks()
 		end
 	end,
 })
 TradeTab:CreateSlider({
-	Name = "Fallback Delay After Block",
-	Range = { 0, 1 },
-	Increment = 0.01,
-	Suffix = "s",
-	CurrentValue = 0.04,
-	Flag = "MT_Delay",
-	Callback = function(v) State.tradeDelay = v end,
-})
-TradeTab:CreateSlider({
 	Name = "Trade Window (s)",
-	Description = "Minimum gap between trade bursts.",
+	Description = "Minimum gap between trade M1s.",
 	Range = { 0, 0.5 },
 	Increment = 0.005,
 	Suffix = "s",
 	CurrentValue = 0.05,
 	Flag = "MT_Window",
 	Callback = function(v) State.tradeWindow = v end,
-})
-TradeTab:CreateSlider({
-	Name = "Hits Per Attack",
-	Description = "How many M1s to fire after each detected attack anim. 2 = double tap.",
-	Range = { 1, 5 },
-	Increment = 1,
-	CurrentValue = 2,
-	Flag = "MT_Hits",
-	Callback = function(v) State.tradeHits = v end,
-})
-TradeTab:CreateSlider({
-	Name = "Hit Gap (s)",
-	Description = "Delay between trade M1s.",
-	Range = { 0.05, 0.5 },
-	Increment = 0.01,
-	Suffix = "s",
-	CurrentValue = 0.12,
-	Flag = "MT_HitGap",
-	Callback = function(v) State.tradeHitGap = v end,
 })
 TradeTab:CreateSection("Manual Test")
 TradeTab:CreateButton({
@@ -2359,7 +2353,7 @@ TradeTab:CreateButton({
 HeadRideTab:CreateSection("Head Ride")
 HeadRideTab:CreateToggle({
 	Name = "Auto Head Ride",
-	Description = "When your finisher HITS an enemy, glides above them and drops off",
+	Description = "When your finisher HITS an enemy, snaps onto their head and rides",
 	CurrentValue = false,
 	Flag = "HR_On",
 	Callback = function(v)
@@ -2381,19 +2375,11 @@ HeadRideTab:CreateToggle({
 })
 HeadRideTab:CreateSlider({
 	Name = "Head Offset",
-	Range = { -2, 10 },
+	Range = { 0, 8 },
 	Increment = 0.1,
-	CurrentValue = 3,
+	CurrentValue = 2,
 	Flag = "HR_Offset",
 	Callback = function(v) State.headRideOffset = v end,
-})
-HeadRideTab:CreateSlider({
-	Name = "Smoothness (time constant)",
-	Range = { 0.05, 1 },
-	Increment = 0.05,
-	CurrentValue = 0.35,
-	Flag = "HR_Alpha",
-	Callback = function(v) State.headRideAlpha = v end,
 })
 HeadRideTab:CreateSlider({
 	Name = "Ride Duration (s)",
@@ -2923,6 +2909,9 @@ end)
 LP.CharacterAdded:Connect(function()
 	task.wait(1)
 	if State.headRide then hookMyAnimator() end
+	hookMyAttacks()
 end)
 
-Airflow:Notify("outlaw.dev", "Loaded. M1 Trade = 2 hits per attack. Block independent.", 5)
+hookMyAttacks()
+
+Airflow:Notify("outlaw.dev", "Loaded. M1 Trade = 1 hit per attack. Block independent.", 5)
