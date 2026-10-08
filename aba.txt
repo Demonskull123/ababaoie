@@ -44,6 +44,8 @@ local State = {
 	trade           = false,
 	tradeWindow     = 0.05,
 	tradeRange      = 25,
+	tradeHits       = 2,
+	tradeHitGap     = 0.08,
 	lastTradeAt     = 0,
 
 	blockEndThread  = nil,
@@ -229,6 +231,16 @@ local function refreshRowDots()
 				or  Color3.fromRGB(70, 70, 70)
 		end
 	end
+end
+
+function selectAnim(id)
+	if type(id) ~= "string" or id == "" then return end
+	local fn = getgenv().OutlawSelectAnim
+	if not fn then
+		Visualizer.pendingId = id
+		return
+	end
+	pcall(fn, id)
 end
 
 local function getInput()
@@ -594,6 +606,28 @@ local function blockPulse(duration)
 	end)
 end
 
+local function counterBurst(sourceModel)
+	local myChar = LP.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	if not myRoot then return end
+
+	if sourceModel and sourceModel ~= myChar then
+		local theirRoot = sourceModel:FindFirstChild("HumanoidRootPart")
+		if theirRoot then
+			local d = (myRoot.Position - theirRoot.Position).Magnitude
+			if d > State.tradeRange then return end
+		end
+	end
+
+	for i = 1, State.tradeHits do
+		if not State.trade then break end
+		fireM1()
+		if i < State.tradeHits then
+			task.wait(State.tradeHitGap)
+		end
+	end
+end
+
 local function onAttack(animId, sourceModel)
 	if not State.autoBlock and not State.trade then return end
 
@@ -601,32 +635,37 @@ local function onAttack(animId, sourceModel)
 	local hasBlockTime = timing and timing.block ~= nil
 	local ping         = State.pingComp and State.pingCompMs / 1000 or 0
 
-	if State.autoBlock then
-		if hasBlockTime then
-			blockPulse(timing.block + ping)
-		else
-			blockPulse(State.blockHold + ping)
-		end
+	local blockDur
+	if hasBlockTime then
+		blockDur = timing.block + ping
+	else
+		blockDur = State.blockHold + ping
+	end
+
+	local blockNow = State.autoBlock or State.trade
+
+	if blockNow then
+		blockPulse(blockDur)
 	end
 
 	if State.trade then
 		local now = tick()
 		if now - State.lastTradeAt < State.tradeWindow then return end
-
-		local myChar = LP.Character
-		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-		if not myRoot then return end
-
-		if sourceModel and sourceModel ~= myChar then
-			local theirRoot = sourceModel:FindFirstChild("HumanoidRootPart")
-			if theirRoot then
-				local d = (myRoot.Position - theirRoot.Position).Magnitude
-				if d > State.tradeRange then return end
-			end
-		end
-
 		State.lastTradeAt = now
-		fireM1()
+
+		task.spawn(function()
+			local offIn = math.max(blockDur - 0.02, 0.02)
+			task.wait(offIn)
+
+			local i = getInput()
+			if i then
+				pcall(task.cancel, State.blockEndThread)
+				State.blockEndThread = nil
+				pcall(function() i:FireServer("BlockOff") end)
+			end
+
+			counterBurst(sourceModel)
+		end)
 	end
 end
 
@@ -2217,7 +2256,7 @@ FarmTab:CreateButton({
 BlockTab:CreateSection("Auto Block")
 BlockTab:CreateToggle({
 	Name = "Auto Block",
-	Description = "Blocks on every known attack id or anim with saved timings. Fires on your own skill anims too.",
+	Description = "Blocks on every known attack id or anim with saved timings.",
 	CurrentValue = false,
 	Flag = "AB_On",
 	Callback = function(v)
@@ -2276,7 +2315,7 @@ BlockTab:CreateSlider({
 	Callback = function(v) State.blockRange = v end,
 })
 BlockTab:CreateSlider({
-	Name = "Fallback Block Hold (s)",
+	Name = "Block Hold (s)",
 	Range = { 0.1, 2 },
 	Increment = 0.01,
 	Suffix = "s",
@@ -2339,7 +2378,7 @@ BlockTab:CreateButton({
 TradeTab:CreateSection("M1 Trade")
 TradeTab:CreateToggle({
 	Name = "M1 Trade",
-	Description = "Fires exactly 1 M1 the instant an attack anim is detected, inside your block window.",
+	Description = "Blocks the incoming attack, then fires 2 counter M1s. Repeats every attack anim.",
 	CurrentValue = false,
 	Flag = "MT_On",
 	Callback = function(v)
@@ -2354,7 +2393,7 @@ TradeTab:CreateToggle({
 })
 TradeTab:CreateSlider({
 	Name = "Trade Range",
-	Description = "Only fires trade M1 if the attacker is within this distance.",
+	Description = "Only counters if the attacker is within this distance.",
 	Range = { 5, 200 },
 	Increment = 1,
 	CurrentValue = 25,
@@ -2362,8 +2401,27 @@ TradeTab:CreateSlider({
 	Callback = function(v) State.tradeRange = v end,
 })
 TradeTab:CreateSlider({
+	Name = "Counter Hits",
+	Description = "How many M1s to fire after each block.",
+	Range = { 1, 5 },
+	Increment = 1,
+	CurrentValue = 2,
+	Flag = "MT_Hits",
+	Callback = function(v) State.tradeHits = v end,
+})
+TradeTab:CreateSlider({
+	Name = "Counter Hit Gap (s)",
+	Description = "Delay between the counter M1s.",
+	Range = { 0.02, 0.5 },
+	Increment = 0.01,
+	Suffix = "s",
+	CurrentValue = 0.08,
+	Flag = "MT_HitGap",
+	Callback = function(v) State.tradeHitGap = v end,
+})
+TradeTab:CreateSlider({
 	Name = "Trade Window (s)",
-	Description = "Minimum gap between trade M1s.",
+	Description = "Minimum gap between counter bursts.",
 	Range = { 0, 0.5 },
 	Increment = 0.005,
 	Suffix = "s",
@@ -2960,4 +3018,4 @@ end)
 
 hookMyAttacks()
 
-Airflow:Notify("outlaw.dev", "Loaded. M1 Trade = 1 hit per attack. Block independent.", 5)
+Airflow:Notify("outlaw.dev", "Loaded. M1 Trade = block then 2 counter hits.", 5)
